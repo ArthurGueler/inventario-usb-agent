@@ -48,7 +48,17 @@ class UsbMonitor:
 
     # Propriedades que precisamos do Win32_PnPEntity — especificar explicitamente
     # garante que CompatibleID (array) seja retornado pelo WMI Python.
-    _WMI_COLUMNS = ['PNPDeviceID', 'Name', 'ClassGuid', 'CompatibleID']
+    _WMI_COLUMNS = [
+        'PNPDeviceID',
+        'Name',
+        'Description',
+        'Manufacturer',
+        'Service',
+        'ClassGuid',
+        'PNPClass',
+        'HardwareID',
+        'CompatibleID',
+    ]
 
     def _scan_existing(self) -> None:
         """Lê todos os dispositivos USB/HID já conectados no momento do start e dispara eventos connected."""
@@ -211,12 +221,16 @@ class UsbMonitor:
         if vid.upper() in self._INTEGRATED_VIDS:
             return
         friendly_name: str | None = getattr(pnp_entity, 'Name', None)
+        description: str | None = getattr(pnp_entity, 'Description', None)
+        manufacturer: str | None = getattr(pnp_entity, 'Manufacturer', None)
+        service: str | None = getattr(pnp_entity, 'Service', None)
         class_guid: str | None = getattr(pnp_entity, 'ClassGuid', None)
+        pnp_class: str | None = getattr(pnp_entity, 'PNPClass', None)
 
         # CompatibleIDs — array de strings que identifica o tipo HID com precisão
         # Ex: ["HID_DEVICE_SYSTEM_MOUSE", "HID_DEVICE_UP:0001_U:0002", ...]
-        raw_compat = getattr(pnp_entity, 'CompatibleID', None)
-        compatible_ids: list[str] = list(raw_compat) if raw_compat else []
+        compatible_ids = self._list_prop(pnp_entity, 'CompatibleID')
+        hardware_ids = self._list_prop(pnp_entity, 'HardwareID')
 
         event_data = {
             'event_type':     event_type,
@@ -226,13 +240,28 @@ class UsbMonitor:
             'serial':         serial,
             'friendly_name':  friendly_name,
             'pnp_device_id':  pnp_id,
-            'class_guid':     class_guid,      # usado pelo classifier, não enviado ao servidor
-            'compatible_ids': compatible_ids,  # usado pelo classifier, não enviado ao servidor
+            'manufacturer':   manufacturer,
+            'description':    description,
+            'service':        service,
+            'class_guid':     class_guid,
+            'pnp_class':      pnp_class,
+            'hardware_ids':   hardware_ids,
+            'compatible_ids': compatible_ids,
         }
 
         logger.info('%s — %s [VID:%s PID:%s compat:%d]',
                     event_type.upper(), friendly_name, vid, pid, len(compatible_ids))
         self._on_event(event_data)
+
+    @staticmethod
+    def _list_prop(pnp_entity: object, name: str) -> list[str]:
+        raw = getattr(pnp_entity, name, None)
+        if not raw:
+            return []
+        try:
+            return [str(x) for x in raw if x]
+        except TypeError:
+            return [str(raw)]
 
     @staticmethod
     def _parse_pnp_id(pnp_id: str) -> tuple[str, str, str | None]:

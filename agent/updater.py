@@ -92,8 +92,12 @@ class Updater:
 
     def _apply_update(self, download_url: str) -> None:
         import requests  # type: ignore[import]
+        from urllib.parse import urljoin, urlparse
 
         current_exe = Path(sys.executable)
+        if not urlparse(download_url).scheme:
+            base_url = getattr(self._reporter, '_base', '')
+            download_url = urljoin(f'{base_url}/', download_url.lstrip('/'))
 
         # Baixar para arquivo temporário no mesmo diretório
         tmp_fd, tmp_path = tempfile.mkstemp(

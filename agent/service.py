@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.14'
+AGENT_VERSION = '1.3.15'
 
 
 class AgentCore:
@@ -277,6 +277,13 @@ class AgentCore:
             'serial':        serial,
             'friendly_name': friendly_name,
             'pnp_device_id': raw_event.get('pnp_device_id'),
+            'manufacturer':  raw_event.get('manufacturer'),
+            'description':   raw_event.get('description'),
+            'service':       raw_event.get('service'),
+            'class_guid':    class_guid,
+            'pnp_class':     raw_event.get('pnp_class'),
+            'hardware_ids':  raw_event.get('hardware_ids') or [],
+            'compatible_ids': compatible_ids,
             'hash_id':       hash_id,
             'device_type':   device_type,
         }
