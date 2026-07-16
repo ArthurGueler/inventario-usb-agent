@@ -24,7 +24,7 @@ from .local_db import LocalDB
 from .reporter import Reporter
 from .usb_monitor import UsbMonitor
 from .hasher import compute_hash_id
-from .classifier import classify
+from .classifier import classify_physical
 from .specs import capture_machine_specs
 from .updater import Updater
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.15'
+AGENT_VERSION = '1.3.16'
 
 
 class AgentCore:
@@ -267,7 +267,13 @@ class AgentCore:
 
         compatible_ids: list[str] = raw_event.get('compatible_ids') or []
         hash_id, serial_is_stable = compute_hash_id(vid, pid, serial)
-        device_type = classify(class_guid, friendly_name, vid, compatible_ids)
+        device_type, classification_source = classify_physical(
+            class_guid,
+            friendly_name,
+            vid,
+            compatible_ids,
+            raw_event.get('interfaces') or [],
+        )
 
         payload: dict[str, Any] = {
             'event_type':    raw_event['event_type'],
@@ -284,6 +290,14 @@ class AgentCore:
             'pnp_class':     raw_event.get('pnp_class'),
             'hardware_ids':  raw_event.get('hardware_ids') or [],
             'compatible_ids': compatible_ids,
+            'physical_instance_id': raw_event.get('physical_instance_id'),
+            'container_id':   raw_event.get('container_id'),
+            'bus_description': raw_event.get('bus_description'),
+            'removal_policy': raw_event.get('removal_policy'),
+            'is_removable': bool(raw_event.get('is_removable')),
+            'interface_count': raw_event.get('interface_count', 0),
+            'is_composite':   bool(raw_event.get('is_composite')),
+            'classification_source': classification_source,
             'hash_id':       hash_id,
             'device_type':   device_type,
         }

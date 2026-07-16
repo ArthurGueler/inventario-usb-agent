@@ -160,6 +160,8 @@ NAME_HEURISTICS: list[tuple[str, str]] = [
     ('wireless',     'adaptador_rede_dongle_wifi'),
     ('wlan',         'adaptador_rede_dongle_wifi'),
     ('bluetooth',    'adaptador_bluetooth'),
+    ('receiver',     'adaptador_usb'),
+    ('receptor',     'adaptador_usb'),
 
     # Vídeo/monitor
     ('monitor',      'monitor_peripheral'),
@@ -230,6 +232,11 @@ def classify(
     if pnp_class_guid:
         guid_type = PNP_CLASS_MAP.get(pnp_class_guid.upper())
 
+    # Para interfaces de entrada, o driver de classe e mais confiavel que um
+    # nome generico ou incorreto fornecido pelo fabricante.
+    if guid_type in ('mouse', 'teclado'):
+        return guid_type
+
     # 3. Nome amigável (heurística por substring) — tem prioridade sobre GUID
     # quando o nome contém info mais específica (ex: "Wireless LAN" > "Net")
     if friendly_name:
@@ -243,3 +250,45 @@ def classify(
 
     # 4. Fallback
     return 'peripheral'
+
+
+def classify_physical(
+    pnp_class_guid: str | None,
+    friendly_name: str | None,
+    vid: str = '',
+    compatible_ids: list[str] | None = None,
+    interfaces: list[dict] | None = None,
+) -> tuple[str, str]:
+    """Classify one physical USB device using its aggregated child interfaces."""
+    name_type = classify(None, friendly_name, vid, [])
+    if name_type not in ('peripheral', 'unknown'):
+        return name_type, 'physical_name'
+
+    interface_types: list[str] = []
+    for interface in interfaces or []:
+        interface_type = classify(
+            interface.get('class_guid'),
+            interface.get('friendly_name'),
+            vid,
+            interface.get('compatible_ids') or [],
+        )
+        if interface_type not in ('peripheral', 'unknown', 'adaptador_usb'):
+            interface_types.append(interface_type)
+
+    # Mouses gamer normalmente publicam interfaces extras de teclado para macros.
+    # Um teclado real costuma ser identificado no nome reportado pelo barramento,
+    # avaliado acima. Sem esse nome, a presenca de uma interface Mouse e a melhor
+    # evidencia fisica disponivel.
+    priority = (
+        'mouse', 'teclado', 'webcam', 'headset', 'fone', 'impressora',
+        'scanner', 'hd_externo', 'pen_drive', 'adaptador_rede_dongle_wifi',
+        'adaptador_rede_usb', 'adaptador_bluetooth',
+    )
+    for device_type in priority:
+        if device_type in interface_types:
+            return device_type, 'child_interface'
+
+    root_type = classify(pnp_class_guid, friendly_name, vid, compatible_ids)
+    if root_type not in ('peripheral', 'unknown'):
+        return root_type, 'physical_class'
+    return root_type, 'fallback'

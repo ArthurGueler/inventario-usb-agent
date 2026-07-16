@@ -1,6 +1,6 @@
 # tests/test_classifier.py
 import pytest
-from agent.classifier import classify
+from agent.classifier import classify, classify_physical
 
 
 class TestClassifyByGuid:
@@ -58,6 +58,9 @@ class TestClassifyByName:
     def test_audio_by_name(self):
         assert classify(None, 'USB Audio Device') == 'fone'
 
+    def test_receiver_by_name(self):
+        assert classify(None, 'Logitech USB Receiver') == 'adaptador_usb'
+
     def test_case_insensitive_name(self):
         assert classify(None, 'LOGITECH USB MOUSE') == 'mouse'
 
@@ -78,3 +81,38 @@ class TestClassifyHubsAndFallback:
         # GUID de mouse, mas nome diz keyboard — GUID vence
         result = classify('{4D36E96B-E325-11CE-BFC1-08002BE10318}', 'USB Keyboard')
         assert result == 'mouse'
+
+
+class TestClassifyPhysicalDevice:
+    def test_gaming_mouse_wins_its_macro_keyboard_interfaces(self):
+        interfaces = [
+            {
+                'friendly_name': 'HID-compliant mouse',
+                'class_guid': '{4D36E96B-E325-11CE-BFC1-08002BE10318}',
+                'compatible_ids': ['HID_DEVICE_SYSTEM_MOUSE'],
+            },
+            {
+                'friendly_name': 'HID Keyboard Device',
+                'class_guid': '{4D36E96A-E325-11CE-BFC1-08002BE10318}',
+                'compatible_ids': ['HID_DEVICE_SYSTEM_KEYBOARD'],
+            },
+        ]
+        result, source = classify_physical(
+            '{36FC9E60-C465-11CF-8056-444553540000}',
+            'Razer Viper Mini',
+            '1532',
+            [],
+            interfaces,
+        )
+        assert result == 'mouse'
+        assert source == 'child_interface'
+
+    def test_bus_reported_keyboard_name_has_priority(self):
+        interfaces = [{
+            'friendly_name': 'HID-compliant consumer control device',
+            'class_guid': None,
+            'compatible_ids': ['HID_DEVICE_UP:000C_U:0001'],
+        }]
+        result, source = classify_physical(None, 'Usb KeyBoard', interfaces=interfaces)
+        assert result == 'teclado'
+        assert source == 'physical_name'
