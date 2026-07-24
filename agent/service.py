@@ -14,6 +14,7 @@ Roda standalone (sem serviço):
 """
 
 import logging
+import secrets
 import threading
 import time
 import socket
@@ -34,7 +35,8 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.18'
+AGENT_VERSION = '1.3.19'
+DEFAULT_SERVER_URL = 'https://inventario.in9automacao.com.br'
 
 
 class AgentCore:
@@ -56,6 +58,8 @@ class AgentCore:
 
     def start(self) -> None:
         logger.info('IN9USBAgent v%s iniciando...', AGENT_VERSION)
+
+        self._ensure_base_config()
 
         reporter = self._build_reporter()
         if reporter is None:
@@ -104,6 +108,14 @@ class AgentCore:
     # -------------------------------------------------------------------------
     # Configuração
     # -------------------------------------------------------------------------
+
+    def _ensure_base_config(self) -> None:
+        if not self._db.server_url:
+            self._db.server_url = DEFAULT_SERVER_URL
+            logger.warning('URL do servidor ausente - usando %s', DEFAULT_SERVER_URL)
+        if not self._db.token:
+            self._db.token = secrets.token_hex(32)
+            logger.warning('Token local ausente - nova credencial gerada para autorregistro')
 
     def _build_reporter(self) -> Reporter | None:
         server_url = self._db.server_url
@@ -181,6 +193,8 @@ class AgentCore:
         assert self._reporter is not None
         specs = capture_machine_specs()
         hostname = specs.get('hostname') or socket.gethostname()
+        if not self._db.machine_id and self._recover_registration(specs, hostname):
+            return
         try:
             resp = self._reporter.register(
                 hostname=hostname,
@@ -203,7 +217,7 @@ class AgentCore:
         except Exception as exc:
             logger.warning('Falha no registro (tentará no próximo heartbeat): %s', exc)
 
-    def _recover_registration(self, specs: dict[str, Any] | None = None, hostname: str | None = None) -> None:
+    def _recover_registration(self, specs: dict[str, Any] | None = None, hostname: str | None = None) -> bool:
         """
         Chamado quando o servidor responde 401/404 pro token local — sinal de que o
         register-new original (rodado pelo instalador) nunca chegou a criar a máquina
@@ -222,17 +236,24 @@ class AgentCore:
                 bios_serial=specs.get('bios_serial'),
                 collaborator_name=self._db.collaborator_name,
                 anydesk_id=specs.get('anydesk_id'),
+                agent_version=AGENT_VERSION,
+                specs=specs,
+                registration_reason='recovery',
             )
             data = resp.get('data') or resp
             if data.get('token'):
                 self._db.token = data['token']
                 self._reporter.set_token(data['token'])
-            if data.get('machine_id'):
-                self._db.machine_id = data['machine_id']
+            machine_id = data.get('machine_id')
+            if not machine_id:
+                raise ValueError('register-new respondeu sem machine_id')
+            self._db.machine_id = machine_id
             logger.info('register-new de recuperação OK — machine_id: %s (pendente de aprovação no portal)',
-                        data.get('machine_id'))
+                        machine_id)
+            return True
         except Exception as exc:
             logger.warning('Falha ao recuperar registro via register-new (tentará no próximo heartbeat): %s', exc)
+            return False
 
     # -------------------------------------------------------------------------
     # Heartbeat loop
@@ -242,6 +263,8 @@ class AgentCore:
         while not self._stop_event.wait(HEARTBEAT_INTERVAL):
             if self._reporter:
                 try:
+                    if not self._db.machine_id:
+                        self._recover_registration()
                     resp = self._reporter.heartbeat(agent_version=AGENT_VERSION)
                     data = resp.get('data', {})
                     if data.get('needs_update') and data.get('download_url'):

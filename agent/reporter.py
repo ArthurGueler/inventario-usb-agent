@@ -63,6 +63,9 @@ class Reporter:
         bios_serial: str | None,
         collaborator_name: str | None = None,
         anydesk_id: str | None = None,
+        agent_version: str | None = None,
+        specs: dict[str, Any] | None = None,
+        registration_reason: str | None = None,
     ) -> dict[str, Any]:
         """
         POST /api/agent/register/new — primeira instalação, sem token.
@@ -78,6 +81,12 @@ class Reporter:
             payload['collaborator_name'] = collaborator_name
         if anydesk_id:
             payload['anydesk_id'] = anydesk_id
+        if agent_version:
+            payload['agent_version'] = agent_version
+        if specs:
+            payload['specs'] = specs
+        if registration_reason:
+            payload['registration_reason'] = registration_reason
 
         # Esta rota é pública — não usa o header X-Agent-Token
         # O token é enviado no body para o servidor armazená-lo

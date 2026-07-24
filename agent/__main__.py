@@ -155,6 +155,7 @@ def cmd_register_new(args: argparse.Namespace) -> None:
     from .reporter import Reporter
     from .local_db import LocalDB
     from .specs import capture_machine_specs
+    from .service import AGENT_VERSION
 
     db = LocalDB()
     url = args.url or db.server_url
@@ -180,6 +181,9 @@ def cmd_register_new(args: argparse.Namespace) -> None:
             bios_serial=specs.get('bios_serial'),
             collaborator_name=collaborator_name,
             anydesk_id=specs.get('anydesk_id'),
+            agent_version=AGENT_VERSION,
+            specs=specs,
+            registration_reason='installation',
         )
         print('Registro OK:', resp)
         data = resp.get('data') or resp

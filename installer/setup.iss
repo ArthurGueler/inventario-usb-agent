@@ -6,7 +6,7 @@
 ; Ou via build\build_installer.bat
 
 #define AppName      "IN9 USB Agent"
-#define AppVersion   "1.3.18"
+#define AppVersion   "1.3.19"
 #define AppPublisher "IN9 Automacao"
 #define AppExeName   "usb_agent.exe"
 #define ServiceName  "IN9USBAgent"
@@ -97,6 +97,21 @@ end;
 function GetCollaboratorName(Param: String): String;
 begin
   Result := Trim(CollaboratorPage.Values[0]);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  Log('Parando servico existente antes de atualizar arquivos...');
+  Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(2000);
+  Log('Encerrando processos antigos do agente...');
+  Exec('taskkill.exe', '/F /IM {#AppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log('Removendo cadastro antigo do servico...');
+  Exec('sc.exe', 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(3000);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

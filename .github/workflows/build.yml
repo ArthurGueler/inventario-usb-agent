@@ -61,6 +61,18 @@ jobs:
             --collect-all pystray `
             main.py
 
+      - name: Smoke test do executavel
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist\usb_agent.exe" `
+            -ArgumentList "--help" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "usb_agent.exe encerrou com codigo $($process.ExitCode)"
+          }
+
       # --------------------------------------------------------
       # 5. Inno Setup → IN9USBAgent_Setup.exe
       # --------------------------------------------------------
