@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.17'
+AGENT_VERSION = '1.3.18'
 
 
 class AgentCore:
@@ -72,14 +72,14 @@ class AgentCore:
         threading.Thread(target=self._try_install_anydesk, daemon=True, name='AnydeskInstallThread').start()
 
         # Iniciar monitor USB
-        self._monitor = UsbMonitor(on_event=self._handle_usb_event)
+        self._monitor = UsbMonitor(
+            on_event=self._handle_usb_event,
+            on_snapshot=self._handle_usb_snapshot,
+        )
         self._monitor.start()
 
         # Updater automático
-        self._updater = Updater(
-            reporter=reporter,
-            on_update_ready=self.stop,
-        )
+        self._updater = Updater(reporter=reporter)
         self._updater.start()
 
         # Loops de heartbeat e flush offline em threads separadas
@@ -247,6 +247,7 @@ class AgentCore:
                     if data.get('needs_update') and data.get('download_url'):
                         logger.info('Nova versão disponível: %s — iniciando auto-update', data.get('current_version'))
                     logger.debug('Heartbeat enviado')
+                    self._sync_current_usb_snapshot()
                 except requests.HTTPError as exc:
                     status = exc.response.status_code if exc.response is not None else None
                     if status in (401, 404):
@@ -308,7 +309,7 @@ class AgentCore:
     # Processamento de evento USB
     # -------------------------------------------------------------------------
 
-    def _handle_usb_event(self, raw_event: dict[str, Any]) -> None:
+    def _build_usb_payload(self, raw_event: dict[str, Any]) -> dict[str, Any]:
         vid: str = raw_event.get('vid', '0000')
         pid: str = raw_event.get('pid', '0000')
         serial: str | None = raw_event.get('serial')
@@ -325,9 +326,9 @@ class AgentCore:
             raw_event.get('interfaces') or [],
         )
 
-        payload: dict[str, Any] = {
-            'event_type':    raw_event['event_type'],
-            'event_time':    raw_event['event_time'],
+        return {
+            'event_type':    raw_event.get('event_type', 'connected'),
+            'event_time':    raw_event.get('event_time'),
             'vid':           vid,
             'pid':           pid,
             'serial':        serial,
@@ -352,6 +353,9 @@ class AgentCore:
             'device_type':   device_type,
         }
 
+    def _handle_usb_event(self, raw_event: dict[str, Any]) -> None:
+        payload = self._build_usb_payload(raw_event)
+
         # Tentar envio imediato — só enfileira se offline ou se o envio falhar
         if self._reporter and self._reporter.is_online():
             try:
@@ -366,6 +370,20 @@ class AgentCore:
 
         self._db.enqueue_event(payload)
         logger.info('Buffer local: %d evento(s) pendente(s)', self._db.pending_count())
+
+    def _handle_usb_snapshot(self, raw_devices: list[dict[str, Any]]) -> None:
+        if not self._reporter:
+            return
+        devices = [self._build_usb_payload(device) for device in raw_devices]
+        try:
+            self._reporter.sync_usb_snapshot(devices)
+            logger.info('Snapshot USB sincronizado: %d dispositivo(s) fisico(s)', len(devices))
+        except Exception as exc:
+            logger.warning('Falha ao sincronizar snapshot USB (tentara no heartbeat): %s', exc)
+
+    def _sync_current_usb_snapshot(self) -> None:
+        if self._monitor:
+            self._handle_usb_snapshot(self._monitor.current_devices())
 
 
 # =============================================================================

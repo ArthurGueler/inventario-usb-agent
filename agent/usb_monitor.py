@@ -14,6 +14,7 @@ from .pnp_topology import PnpProperties, safe_enumerate_pnp_properties
 logger = logging.getLogger(__name__)
 
 EventCallback = Callable[[dict], None]
+SnapshotCallback = Callable[[list[dict]], None]
 
 _VID_RE = re.compile(r'VID_([0-9A-Fa-f]{4})', re.IGNORECASE)
 _PID_RE = re.compile(r'PID_([0-9A-Fa-f]{4})', re.IGNORECASE)
@@ -44,11 +45,17 @@ class UsbMonitor:
     ]
     _DEBOUNCE_SECONDS = 1.25
 
-    def __init__(self, on_event: EventCallback):
+    def __init__(
+        self,
+        on_event: EventCallback,
+        on_snapshot: SnapshotCallback | None = None,
+    ):
         self._on_event = on_event
+        self._on_snapshot = on_snapshot
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._known_devices: dict[str, dict] = {}
+        self._devices_lock = threading.Lock()
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -125,12 +132,24 @@ class UsbMonitor:
         for physical_id in sorted(connected_ids):
             self._emit(current[physical_id], 'connected')
 
-        self._known_devices = current
+        with self._devices_lock:
+            self._known_devices = current
+
+        if self._on_snapshot:
+            try:
+                self._on_snapshot([dict(device) for device in current.values()])
+            except Exception as exc:
+                logger.warning('Falha ao sincronizar snapshot USB: %s', exc)
         if initial:
             logger.info(
                 'Scan inicial: %d dispositivo(s) USB fisico(s) reportado(s)',
                 len(current),
             )
+
+    def current_devices(self) -> list[dict]:
+        """Return a thread-safe copy of the current physical USB snapshot."""
+        with self._devices_lock:
+            return [dict(device) for device in self._known_devices.values()]
 
     def _capture_snapshot(self, c: object) -> dict[str, dict]:
         entities = c.Win32_PnPEntity(self._WMI_COLUMNS)  # type: ignore[attr-defined]

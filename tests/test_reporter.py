@@ -119,6 +119,21 @@ class TestIsOnline:
             assert reporter.is_online() is False
 
 
+class TestUsbSnapshot:
+    def test_sync_usb_snapshot_posts_devices(self, reporter):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'success': True, 'connected': 1, 'disconnected': 4}
+        mock_resp.raise_for_status = MagicMock()
+        devices = [{'vid': '1532', 'pid': '008A'}]
+
+        with patch.object(reporter._session, 'post', return_value=mock_resp) as mock_post:
+            result = reporter.sync_usb_snapshot(devices)
+
+        assert mock_post.call_args[0][0] == f'{FAKE_URL}/api/agent/usb-snapshot'
+        assert mock_post.call_args[1]['json'] == {'devices': devices}
+        assert result['disconnected'] == 4
+
+
 class TestRegisterNew:
     def test_register_new_without_token_header(self, reporter):
         mock_resp = MagicMock()

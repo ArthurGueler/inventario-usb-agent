@@ -111,6 +111,11 @@ class Reporter:
         logger.debug('Enviando evento USB: %s %s', event.get('event_type'), event.get('friendly_name'))
         return self._post('/api/agent/usb-event', event)
 
+    def sync_usb_snapshot(self, devices: list[dict[str, Any]]) -> dict[str, Any]:
+        """POST /api/agent/usb-snapshot - reconcilia o estado USB fisico atual."""
+        logger.debug('Sincronizando snapshot USB: %d dispositivo(s)', len(devices))
+        return self._post('/api/agent/usb-snapshot', {'devices': devices})
+
     def check_version(self) -> dict[str, Any]:
         """GET /api/agent/version — verifica se há update disponível."""
         return self._get('/api/agent/version')

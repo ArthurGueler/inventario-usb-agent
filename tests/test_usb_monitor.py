@@ -86,3 +86,16 @@ def test_internal_usb_component_is_ignored_by_removal_policy():
     }
 
     assert UsbMonitor._build_snapshot(entities, topology) == {}
+
+
+def test_refresh_publishes_complete_snapshot(monkeypatch):
+    root_id = r'USB\VID_1234&PID_5678\SERIAL001'
+    device = {'vid': '1234', 'pid': '5678', 'pnp_device_id': root_id}
+    snapshots = []
+    monitor = UsbMonitor(lambda event: None, on_snapshot=snapshots.append)
+    monkeypatch.setattr(monitor, '_capture_snapshot', lambda _c: {root_id: device})
+
+    monitor._refresh(object(), initial=True)
+
+    assert snapshots == [[device]]
+    assert monitor.current_devices() == [device]
