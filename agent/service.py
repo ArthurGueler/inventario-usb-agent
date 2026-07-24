@@ -20,6 +20,8 @@ import socket
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from .local_db import LocalDB
 from .reporter import Reporter
 from .usb_monitor import UsbMonitor
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.16'
+AGENT_VERSION = '1.3.17'
 
 
 class AgentCore:
@@ -177,9 +179,9 @@ class AgentCore:
 
     def _do_register(self) -> None:
         assert self._reporter is not None
+        specs = capture_machine_specs()
+        hostname = specs.get('hostname') or socket.gethostname()
         try:
-            specs = capture_machine_specs()
-            hostname = specs.get('hostname') or socket.gethostname()
             resp = self._reporter.register(
                 hostname=hostname,
                 agent_version=AGENT_VERSION,
@@ -189,8 +191,48 @@ class AgentCore:
             logger.info('Registro OK — status: %s', data.get('status'))
             if data.get('machine_id'):
                 self._db.machine_id = data['machine_id']
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (401, 404):
+                logger.warning('Token não reconhecido pelo servidor (HTTP %s) — o register-new original '
+                               '(feito no instalador) deve ter falhado. Tentando registrar como máquina nova...',
+                               status)
+                self._recover_registration(specs, hostname)
+            else:
+                logger.warning('Falha no registro (tentará no próximo heartbeat): %s', exc)
         except Exception as exc:
             logger.warning('Falha no registro (tentará no próximo heartbeat): %s', exc)
+
+    def _recover_registration(self, specs: dict[str, Any] | None = None, hostname: str | None = None) -> None:
+        """
+        Chamado quando o servidor responde 401/404 pro token local — sinal de que o
+        register-new original (rodado pelo instalador) nunca chegou a criar a máquina
+        no servidor (rede fora do ar no momento da instalação, etc.). Sem isso, o
+        agente ficaria retentando `register` pra sempre, sem nunca aparecer no portal.
+        """
+        assert self._reporter is not None
+        if specs is None:
+            specs = capture_machine_specs()
+        if hostname is None:
+            hostname = specs.get('hostname') or socket.gethostname()
+        try:
+            resp = self._reporter.register_new(
+                hostname=hostname,
+                mac_address=specs.get('mac_address'),
+                bios_serial=specs.get('bios_serial'),
+                collaborator_name=self._db.collaborator_name,
+                anydesk_id=specs.get('anydesk_id'),
+            )
+            data = resp.get('data') or resp
+            if data.get('token'):
+                self._db.token = data['token']
+                self._reporter.set_token(data['token'])
+            if data.get('machine_id'):
+                self._db.machine_id = data['machine_id']
+            logger.info('register-new de recuperação OK — machine_id: %s (pendente de aprovação no portal)',
+                        data.get('machine_id'))
+        except Exception as exc:
+            logger.warning('Falha ao recuperar registro via register-new (tentará no próximo heartbeat): %s', exc)
 
     # -------------------------------------------------------------------------
     # Heartbeat loop
@@ -205,6 +247,14 @@ class AgentCore:
                     if data.get('needs_update') and data.get('download_url'):
                         logger.info('Nova versão disponível: %s — iniciando auto-update', data.get('current_version'))
                     logger.debug('Heartbeat enviado')
+                except requests.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status in (401, 404):
+                        logger.warning('Token não reconhecido pelo servidor (HTTP %s) no heartbeat — '
+                                       'tentando registrar como máquina nova...', status)
+                        self._recover_registration()
+                    else:
+                        logger.warning('Heartbeat falhou: %s', exc)
                 except Exception as exc:
                     logger.warning('Heartbeat falhou: %s', exc)
 

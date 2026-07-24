@@ -35,6 +35,11 @@ class Reporter:
         """Retorna apenas os últimos 8 chars do token para logs."""
         return f'...{self._token[-8:]}' if len(self._token) >= 8 else '***'
 
+    def set_token(self, token: str) -> None:
+        """Atualiza o token usado nas próximas requisições (ex: após um register-new de recuperação)."""
+        self._token = token
+        self._session.headers['X-Agent-Token'] = token
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f'{self._base}{path}'
         response = self._session.post(url, json=payload, timeout=TIMEOUT)

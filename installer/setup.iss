@@ -6,7 +6,7 @@
 ; Ou via build\build_installer.bat
 
 #define AppName      "IN9 USB Agent"
-#define AppVersion   "1.3.16"
+#define AppVersion   "1.3.17"
 #define AppPublisher "IN9 Automacao"
 #define AppExeName   "usb_agent.exe"
 #define ServiceName  "IN9USBAgent"
@@ -123,10 +123,19 @@ begin
 
     // 2. Registrar no servidor (token agora válido para chamadas autenticadas)
     Log('Registrando no servidor...');
-    Exec(ExePath,
-      'register-new',
-      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Log('register-new código: ' + IntToStr(ResultCode));
+    if (not Exec(ExePath, 'register-new', ExpandConstant('{app}'),
+        SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+    begin
+      Log('register-new falhou (código ' + IntToStr(ResultCode) + ')');
+      MsgBox('Aviso: não foi possível registrar esta máquina no servidor agora ' +
+             '(rede ou servidor indisponível no momento da instalação).' + #13#10 + #13#10 +
+             'Isso não impede a instalação — o agente detecta isso sozinho e tenta se ' +
+             'registrar novamente em segundo plano. Se a máquina ainda não aparecer no ' +
+             'portal para aprovação em alguns minutos, verifique a conectividade desta ' +
+             'máquina com o servidor.', mbInformation, MB_OK);
+    end
+    else
+      Log('register-new código: ' + IntToStr(ResultCode));
 
     // 3. Instalar AnyDesk + re-register com anydesk_id (cobre caso 1 e caso 2)
     Log('Instalando AnyDesk e capturando ID...');
