@@ -163,8 +163,10 @@ class Updater:
         """
         bat_path = current_exe.parent / '_update_replace.bat'
         bak_path = current_exe.with_suffix('.bak')
+        error_path = current_exe.parent / '_update_error.log'
         bat_content = f"""@echo off
 sc stop IN9USBAgent >nul 2>&1
+taskkill /F /IM usb_agent.exe >nul 2>&1
 set tries=0
 :retry
 timeout /t 2 /nobreak >nul
@@ -173,9 +175,11 @@ copy /y "{current_exe}" "{bak_path}" >nul 2>&1
 move /y "{new_exe}" "{current_exe}" >nul 2>&1
 if not exist "{new_exe}" goto updated
 if %tries% LSS 30 goto retry
+echo %date% %time% Falha ao substituir "{current_exe}" apos 30 tentativas>"{error_path}"
 sc start IN9USBAgent >nul 2>&1
 exit /b 1
 :updated
+if exist "{error_path}" del /q "{error_path}"
 sc start IN9USBAgent >nul 2>&1
 del "%~f0"
 """

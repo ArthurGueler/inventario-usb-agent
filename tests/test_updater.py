@@ -43,7 +43,7 @@ def test_check_once_still_accepts_legacy_flat_response(monkeypatch):
     assert called == [('/api/agent/download', None)]
 
 
-def test_windows_replace_script_stops_service_and_retries(monkeypatch, tmp_path):
+def test_windows_replace_script_stops_all_agent_processes_and_retries(monkeypatch, tmp_path):
     updater = Updater(FakeReporter({}))
     current = tmp_path / 'usb_agent.exe'
     incoming = tmp_path / 'usb_agent_update.exe'
@@ -55,6 +55,8 @@ def test_windows_replace_script_stops_service_and_retries(monkeypatch, tmp_path)
 
     script = (tmp_path / '_update_replace.bat').read_text(encoding='utf-8')
     assert 'sc stop IN9USBAgent' in script
+    assert 'taskkill /F /IM usb_agent.exe' in script
     assert ':retry' in script
+    assert 'apos 30 tentativas' in script
     assert 'sc start IN9USBAgent' in script
     assert str(current.with_suffix('.bak')) in script

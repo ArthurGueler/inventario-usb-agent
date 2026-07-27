@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.19'
+AGENT_VERSION = '1.3.20'
 DEFAULT_SERVER_URL = 'https://inventario.in9automacao.com.br'
 
 

@@ -150,7 +150,7 @@ class TestRegisterNew:
                 hostname='DESK-NEW',
                 mac_address='AA:BB:CC:DD:EE:FF',
                 bios_serial='PF2BXX12',
-                agent_version='1.3.19',
+                agent_version='1.3.20',
                 specs={'hostname': 'DESK-NEW', 'ram_gb': 16},
                 registration_reason='installation',
             )
@@ -158,7 +158,7 @@ class TestRegisterNew:
         call_kwargs = mock_post.call_args[1]
         # Não deve ter X-Agent-Token (rota pública)
         assert 'X-Agent-Token' not in call_kwargs.get('headers', {})
-        assert call_kwargs['json']['agent_version'] == '1.3.19'
+        assert call_kwargs['json']['agent_version'] == '1.3.20'
         assert call_kwargs['json']['specs']['ram_gb'] == 16
         assert call_kwargs['json']['registration_reason'] == 'installation'
         assert result['machine_id'] == 'new-uuid'
