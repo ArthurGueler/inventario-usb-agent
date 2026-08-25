@@ -106,6 +106,38 @@ Duas formas de limpar bloqueios pré-existentes, que vencem qualquer permissão:
 
 `profiles` default é `Domain,Private`. Evite `Public`.
 
+### Sobre `ensure_running`
+
+O `autostart` só cobre o logon. Se o usuário fechar o app, ou ele cair, fica
+fora até o próximo logon. `ensure_running` faz o agente conferir a cada 2
+minutos e subir de volta:
+
+```json
+"ensure_running": {
+  "process_path": "%USERPROFILE%\\...\\jre\\bin\\javaw.exe",
+  "command": "\"%USERPROFILE%\\...\\executar\\web_connection.exe\"",
+  "cwd": "%USERPROFILE%\\...\\executar"
+}
+```
+
+`process_path` é **quem realmente fica em memória**, que nem sempre é o que você
+dispara — no Sankhya WC se lança `web_connection.exe` mas quem permanece é o
+`javaw.exe`. Errar isso faz o agente relançar o app em loop.
+
+O agente roda como LocalSystem, na sessão 0. Ele **não** pode dar um start
+qualquer num app de GUI: o processo nasceria invisível e, pior, com o contexto
+de impressoras do SYSTEM em vez do usuário — o que quebraria justamente a função
+do Web Connection. Por isso o lançamento passa por `CreateProcessAsUser` com o
+token da sessão interativa (`agent/win_session.py`). Sessões simultâneas (troca
+rápida de usuário, RDP) são tratadas uma a uma.
+
+Proteções: carência de 90s depois de disparar, para não contar duas vezes
+enquanto o app sobe; e após 3 falhas seguidas o agente desiste por 30 minutos e
+reporta `package_launch_failed`, em vez de ficar num loop de reinício.
+
+**Consequência esperada:** se o usuário fechar o Web Connection de propósito, ele
+volta em até 2 minutos. É o comportamento pedido, mas vale avisar o pessoal.
+
 ### Sobre `autostart`
 
 Uma única entrada `REG_EXPAND_SZ` em `HKLM\...\Run` cobre todos os perfis: o
@@ -155,6 +187,11 @@ Valores extraídos de uma máquina já configurada
   "autostart": {
     "name": "SankhyaWebConnection",
     "command": "\"%USERPROFILE%\\Sankhya web\\Sankhya_web_connectionx64\\executar\\web_connection.exe\""
+  },
+  "ensure_running": {
+    "process_path": "%USERPROFILE%\\Sankhya web\\Sankhya_web_connectionx64\\jre\\bin\\javaw.exe",
+    "command": "\"%USERPROFILE%\\Sankhya web\\Sankhya_web_connectionx64\\executar\\web_connection.exe\"",
+    "cwd": "%USERPROFILE%\\Sankhya web\\Sankhya_web_connectionx64\\executar"
   }
 }
 ```

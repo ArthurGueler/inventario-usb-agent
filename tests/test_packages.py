@@ -305,6 +305,166 @@ def test_firewall_escapa_aspas_simples_no_nome(monkeypatch, tmp_path):
     assert "d''Agua" in scripts[0]
 
 
+# =============================================================================
+# Supervisão (ensure_running)
+#
+# O agente roda como SYSTEM na sessão 0; manter o app de pé significa lançá-lo
+# dentro da sessão de quem está logado, e não insistir para sempre se ele morre.
+# =============================================================================
+
+class FakeToken:
+    def __init__(self):
+        self.closed = False
+
+    def Close(self):
+        self.closed = True
+
+
+class FakeWinSession:
+    """Substitui agent.packages.win_session nos testes."""
+
+    Session = _RealSession = None  # preenchido abaixo
+
+    def __init__(self, profile, sessions, running=False):
+        self._profile = profile
+        self._sessions = sessions
+        self.running = running
+        self.launches = []
+        self.launch_ok = True
+        self.tokens = []
+
+    def active_sessions(self):
+        return self._sessions
+
+    def user_token(self, session_id):
+        token = FakeToken()
+        self.tokens.append(token)
+        return token
+
+    def profile_dir(self, token):
+        return self._profile
+
+    def is_running(self, exe_path, username=None):
+        return self.running
+
+    def launch_as_user(self, token, command, cwd=None):
+        self.launches.append((command, str(cwd) if cwd else None))
+        return 4242 if self.launch_ok else None
+
+
+def _supervised_manager(monkeypatch, tmp_path, running=False, sessions=None):
+    from agent.win_session import Session
+
+    exe = tmp_path / 'app' / 'jre' / 'bin' / 'javaw.exe'
+    exe.parent.mkdir(parents=True)
+    exe.write_text('MZ')
+
+    sessions = sessions if sessions is not None else [Session(2, 'DOM\\ana')]
+    fake = FakeWinSession(tmp_path, sessions, running=running)
+    monkeypatch.setattr('agent.packages.win_session', fake)
+    monkeypatch.setattr('agent.packages.sys.platform', 'win32')
+
+    manager = PackageManager(FakeReporter())
+    manager._supervised = [('sankhya', {
+        'process_path': '%USERPROFILE%\\app\\jre\\bin\\javaw.exe',
+        'command': '"%USERPROFILE%\\app\\executar\\web_connection.exe"',
+    })]
+    return manager, fake
+
+
+def test_supervisao_inicia_o_app_quando_nao_esta_rodando(monkeypatch, tmp_path):
+    manager, fake = _supervised_manager(monkeypatch, tmp_path, running=False)
+
+    manager.supervise_once()
+
+    assert len(fake.launches) == 1
+    comando, cwd = fake.launches[0]
+    # as aspas do comando têm que sobreviver à expansão
+    assert comando.startswith('"') and comando.endswith('web_connection.exe"')
+    assert str(tmp_path) in comando
+    assert '%USERPROFILE%' not in comando
+    assert cwd.endswith('bin')
+
+
+def test_supervisao_nao_faz_nada_se_ja_esta_rodando(monkeypatch, tmp_path):
+    manager, fake = _supervised_manager(monkeypatch, tmp_path, running=True)
+    manager.supervise_once()
+    assert fake.launches == []
+
+
+def test_supervisao_fecha_o_token_sempre(monkeypatch, tmp_path):
+    manager, fake = _supervised_manager(monkeypatch, tmp_path, running=True)
+    manager.supervise_once()
+    assert fake.tokens and all(t.closed for t in fake.tokens)
+
+
+def test_supervisao_respeita_carencia_apos_disparar(monkeypatch, tmp_path):
+    manager, fake = _supervised_manager(monkeypatch, tmp_path, running=False)
+
+    manager.supervise_once()
+    manager.supervise_once()  # o app ainda estaria subindo
+
+    assert len(fake.launches) == 1
+
+
+def test_supervisao_desiste_depois_de_falhas_seguidas(monkeypatch, tmp_path):
+    from agent import packages as mod
+
+    manager, fake = _supervised_manager(monkeypatch, tmp_path, running=False)
+    fake.launch_ok = False
+    monkeypatch.setattr(mod, 'LAUNCH_GRACE_SECONDS', 0)
+
+    for _ in range(mod.MAX_LAUNCH_FAILURES + 3):
+        manager.supervise_once()
+
+    assert len(fake.launches) == mod.MAX_LAUNCH_FAILURES
+    codes = [h[0] for h in manager._reporter.health]
+    assert 'package_launch_failed' in codes
+
+
+def test_supervisao_ignora_perfil_sem_o_app_instalado(monkeypatch, tmp_path):
+    from agent.win_session import Session
+
+    vazio = tmp_path / 'sem_app'
+    vazio.mkdir()
+    fake = FakeWinSession(vazio, [Session(2, 'DOM\\ana')], running=False)
+    monkeypatch.setattr('agent.packages.win_session', fake)
+    monkeypatch.setattr('agent.packages.sys.platform', 'win32')
+
+    manager = PackageManager(FakeReporter())
+    manager._supervised = [('sankhya', {
+        'process_path': '%USERPROFILE%\\app\\jre\\bin\\javaw.exe',
+        'command': '"%USERPROFILE%\\app\\executar\\web_connection.exe"',
+    })]
+    manager.supervise_once()
+
+    assert fake.launches == []
+
+
+def test_supervisao_sem_ninguem_logado_nao_dispara(monkeypatch, tmp_path):
+    manager, fake = _supervised_manager(monkeypatch, tmp_path, running=False, sessions=[])
+    manager.supervise_once()
+    assert fake.launches == []
+
+
+def test_manifesto_sem_ensure_running_nao_supervisiona(monkeypatch):
+    reporter = FakeReporter({'packages': []})
+    manager = PackageManager(reporter)
+    manager.check_once()
+    assert manager._supervised == []
+
+
+def test_check_once_registra_specs_de_supervisao(tmp_path):
+    pkg = {
+        'name': 'sankhya',
+        'extract_to': str(tmp_path),
+        'ensure_running': {'process_path': 'x', 'command': 'y'},
+    }
+    manager = PackageManager(FakeReporter({'packages': [pkg]}))
+    manager.check_once()
+    assert manager._supervised == [('sankhya', {'process_path': 'x', 'command': 'y'})]
+
+
 def test_apply_config_ignora_arquivo_inexistente(tmp_path):
     pkg = {'config_files': [{
         'path': str(tmp_path / 'nao_existe.ini'),

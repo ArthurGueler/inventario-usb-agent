@@ -53,6 +53,10 @@ jobs:
             --hidden-import win32serviceutil `
             --hidden-import win32event `
             --hidden-import servicemanager `
+            --hidden-import win32ts `
+            --hidden-import win32profile `
+            --hidden-import win32process `
+            --hidden-import win32con `
             --hidden-import wmi `
             --hidden-import pywintypes `
             --hidden-import "pystray._win32" `

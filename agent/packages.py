@@ -26,8 +26,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, NamedTuple
+
+from . import win_session
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,12 @@ CHECK_INTERVAL = 3600           # verifica o manifesto a cada 1 hora
 FIRST_CHECK_DELAY = 120         # deixa o startup do servico respirar antes
 MAX_PAYLOAD_BYTES = 1024 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 900          # payloads podem passar de 100 MB
+
+# Supervisao de processos (ensure_running)
+SUPERVISE_INTERVAL = 120        # com que frequencia conferimos se o app caiu
+LAUNCH_GRACE_SECONDS = 90       # tempo para o app subir antes de contar de novo
+MAX_LAUNCH_FAILURES = 3         # falhas seguidas antes de desistir por um tempo
+LAUNCH_BACKOFF_SECONDS = 1800   # ...e por quanto tempo desistir
 
 _HKLM_RUN = r'Software\Microsoft\Windows\CurrentVersion\Run'
 
@@ -67,12 +76,18 @@ def user_profiles() -> list[Path]:
     return profiles
 
 
-def expand_path(template: str, profile: Path | None) -> Path:
+def expand_text(template: str, profile: Path | None) -> str:
     """Resolve %USERPROFILE% para o perfil alvo e demais variaveis do ambiente."""
     text = str(template)
     if profile is not None:
         text = text.replace('%USERPROFILE%', str(profile))
-    return Path(os.path.expandvars(text))
+    return os.path.expandvars(text)
+
+
+def expand_path(template: str, profile: Path | None) -> Path:
+    """Idem, para valores que sao caminho. Nao use com linha de comando: as
+    aspas de um comando viram parte do nome do arquivo."""
+    return Path(expand_text(template, profile))
 
 
 def rewrite_config(text: str, values: dict[str, Any], fmt: str = 'jvm_args') -> str:
@@ -120,11 +135,18 @@ class PackageManager:
     Roda em thread daemon — nunca bloqueia o servico.
     """
 
-    def __init__(self, reporter: object, check_interval: int = CHECK_INTERVAL):
+    def __init__(self, reporter: object, check_interval: int = CHECK_INTERVAL,
+                 supervise_interval: int = SUPERVISE_INTERVAL):
         self._reporter = reporter
         self._interval = check_interval
+        self._supervise_interval = supervise_interval
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._supervisor: threading.Thread | None = None
+        # specs de ensure_running do ultimo manifesto lido com sucesso
+        self._supervised: list[tuple[str, dict[str, Any]]] = []
+        # chave 'pacote:usuario' -> (falhas seguidas, instante da ultima tentativa)
+        self._launch_state: dict[str, tuple[int, float]] = {}
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -134,7 +156,14 @@ class PackageManager:
             daemon=True,
         )
         self._thread.start()
-        logger.debug('PackageManager iniciado (intervalo: %ds)', self._interval)
+        self._supervisor = threading.Thread(
+            target=self._supervise_loop,
+            name='PackagesSupervisorThread',
+            daemon=True,
+        )
+        self._supervisor.start()
+        logger.debug('PackageManager iniciado (manifesto: %ds, supervisao: %ds)',
+                     self._interval, self._supervise_interval)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -158,13 +187,20 @@ class PackageManager:
             logger.debug('Manifesto de pacotes indisponivel: %s', exc)
             return
 
+        supervised: list[tuple[str, dict[str, Any]]] = []
         for pkg in self._unwrap(resp):
             name = pkg.get('name', '?')
+            if pkg.get('ensure_running'):
+                supervised.append((name, pkg['ensure_running']))
             try:
                 self.ensure_package(pkg)
             except Exception as exc:
                 logger.warning('Falha ao aplicar pacote %s: %s', name, exc, exc_info=True)
                 self._report('package_failed', 'error', name, str(exc))
+
+        # so troca depois de uma leitura bem sucedida: se o servidor cair, a
+        # supervisao continua valendo com o ultimo manifesto conhecido
+        self._supervised = supervised
 
     @staticmethod
     def _unwrap(resp: Any) -> list[dict[str, Any]]:
@@ -460,6 +496,98 @@ class PackageManager:
             logger.info('Autostart configurado: %s', name)
         except OSError as exc:
             logger.warning('Falha ao gravar autostart %s: %s', name, exc)
+
+    # -------------------------------------------------------------------------
+    # Supervisao — manter o app de pe na sessao de quem esta logado
+    # -------------------------------------------------------------------------
+
+    def _supervise_loop(self) -> None:
+        if self._stop_event.wait(FIRST_CHECK_DELAY + 30):
+            return
+        while not self._stop_event.is_set():
+            try:
+                self.supervise_once()
+            except Exception as exc:
+                logger.warning('Supervisao falhou: %s', exc, exc_info=True)
+            self._stop_event.wait(self._supervise_interval)
+
+    def supervise_once(self) -> None:
+        if sys.platform != 'win32' or not self._supervised:
+            return
+
+        sessions = win_session.active_sessions()
+        if not sessions:
+            return  # ninguem logado — nao ha sessao onde por o app
+
+        for name, spec in self._supervised:
+            for session in sessions:
+                try:
+                    self._ensure_running_in_session(name, spec, session)
+                except Exception as exc:
+                    logger.warning('Falha ao supervisionar %s na sessao %s: %s',
+                                   name, session.username, exc)
+
+    def _ensure_running_in_session(
+        self,
+        name: str,
+        spec: dict[str, Any],
+        session: 'win_session.Session',
+    ) -> None:
+        token = win_session.user_token(session.id)
+        try:
+            profile = win_session.profile_dir(token)
+            if profile is None:
+                return
+
+            process_path = spec.get('process_path')
+            command = spec.get('command')
+            if not process_path or not command:
+                return
+
+            exe = expand_path(process_path, profile)
+            if not exe.exists():
+                return  # pacote ainda nao instalado neste perfil
+
+            key = f'{name}:{session.username}'
+            if win_session.is_running(exe, session.username):
+                self._launch_state.pop(key, None)
+                return
+
+            failures, last_attempt = self._launch_state.get(key, (0, 0.0))
+            now = time.monotonic()
+
+            # Acabamos de disparar: o app ainda pode estar subindo
+            if now - last_attempt < LAUNCH_GRACE_SECONDS:
+                return
+
+            # Nao insistir para sempre num app que morre ao nascer
+            if failures >= MAX_LAUNCH_FAILURES:
+                if now - last_attempt < LAUNCH_BACKOFF_SECONDS:
+                    return
+                logger.info('Retomando tentativas de subir %s para %s', name, session.username)
+                failures = 0
+
+            resolved = expand_text(command, profile)
+            cwd_spec = spec.get('cwd')
+            cwd = expand_path(cwd_spec, profile) if cwd_spec else exe.parent
+
+            pid = win_session.launch_as_user(token, resolved, cwd)
+            if pid:
+                logger.info('%s iniciado na sessao de %s (pid %s)', name, session.username, pid)
+                self._launch_state[key] = (0, now)
+            else:
+                failures += 1
+                self._launch_state[key] = (failures, now)
+                logger.warning('Falha %d/%d ao iniciar %s para %s',
+                               failures, MAX_LAUNCH_FAILURES, name, session.username)
+                if failures == MAX_LAUNCH_FAILURES:
+                    self._report('package_launch_failed', 'warning', name,
+                                 f'nao foi possivel iniciar para {session.username}')
+        finally:
+            try:
+                token.Close()
+            except Exception:
+                pass
 
     # -------------------------------------------------------------------------
     # Telemetria
