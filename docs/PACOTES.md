@@ -104,7 +104,21 @@ Duas formas de limpar bloqueios pré-existentes, que vencem qualquer permissão:
   preciso, e o recomendado: remove só o que aponta para a pasta do app, sem
   arriscar apagar bloqueios legítimos de outros programas Java.
 
-`profiles` default é `Domain,Private`. Evite `Public`.
+**`profiles` default é `Any`, e isso é deliberado.** Uma regra vale apenas no
+perfil de rede **ativo**. Máquina fora de domínio — que é o caso de todo o parque,
+hostnames `DESKTOP-*` em workgroup — cai em `Public` por padrão. Uma regra
+`Domain,Private` simplesmente não existiria para o Windows naquele momento, e o
+diálogo voltaria a aparecer.
+
+Para compensar a abertura, use `remote_address` (ex.: `LocalSubnet`). Isso custa
+pouco: o navegador fala com o WC por `localhost`, e **tráfego de loopback não passa
+pelo firewall** — o escopo só limita quem, de fora, alcança a porta. Vale notar
+que o diálogo dispara porque o app escuta em `0.0.0.0`, não porque alguém acessou
+a porta.
+
+O agente **remove e recria** a regra a cada passagem, em vez de "criar se não
+existir". Sem isso, uma máquina que já tem a regra antiga ficaria com ela para
+sempre quando o manifesto mudasse.
 
 ### Sobre `ensure_running`
 
@@ -179,7 +193,8 @@ Valores extraídos de uma máquina já configurada
       "ports": [9096, 9098],
       "protocol": "TCP",
       "direction": "in",
-      "profiles": ["Domain", "Private"],
+      "profiles": ["Any"],
+      "remote_address": "LocalSubnet",
       "program": "%USERPROFILE%\\Sankhya web\\Sankhya_web_connectionx64\\jre\\bin\\javaw.exe",
       "purge_blocking_program_matching": "Sankhya web"
     }

@@ -434,7 +434,11 @@ class PackageManager:
         quoted = _ps_quote(name)
         direction = 'Inbound' if rule.get('direction', 'in') == 'in' else 'Outbound'
         protocol = rule.get('protocol', 'TCP')
-        profiles = ','.join(rule.get('profiles') or ['Domain', 'Private'])
+
+        # 'Any' de proposito: uma regra so vale no perfil de rede ATIVO. Maquina
+        # fora de dominio cai em Public por padrao, e uma regra Domain,Private
+        # nao suprimiria o dialogo la — que e justamente o problema a evitar.
+        profiles = ','.join(rule.get('profiles') or ['Any'])
 
         create = [
             f"New-NetFirewallRule -DisplayName '{quoted}' -Group 'IN9USBAgent' "
@@ -444,10 +448,18 @@ class PackageManager:
             create.append(f"-LocalPort {','.join(str(p) for p in ports)}")
         if program_path:
             create.append(f"-Program '{_ps_quote(str(program_path))}'")
+        # Compensa o -Profile Any: limita a exposicao ao segmento local em vez
+        # de deixar a porta aberta para qualquer rede em que a maquina entrar.
+        remote = rule.get('remote_address')
+        if remote:
+            create.append(f"-RemoteAddress {_ps_quote(str(remote))}")
 
+        # Remove antes de criar em vez de "cria se nao existir": assim uma
+        # mudanca no manifesto (perfil, porta, escopo) converge nas maquinas que
+        # ja tinham a regra antiga, em vez de ficar com a versao errada para sempre.
         self._powershell(
-            f"if (-not (Get-NetFirewallRule -DisplayName '{quoted}' -ErrorAction SilentlyContinue)) "
-            f"{{ {' '.join(create)} | Out-Null }}"
+            f"Remove-NetFirewallRule -DisplayName '{quoted}' -ErrorAction SilentlyContinue; "
+            f"{' '.join(create)} | Out-Null"
         )
         logger.info('Regra de firewall garantida: %s', name)
 

@@ -284,6 +284,30 @@ def test_firewall_sem_program_cria_regra_unica_de_porta(monkeypatch, tmp_path):
     assert '-LocalPort 9096' in scripts[0]
 
 
+def test_firewall_usa_perfil_any_por_padrao(monkeypatch, tmp_path):
+    """
+    Máquina fora de domínio cai em Public. Uma regra Domain,Private não valeria
+    no perfil ativo e o diálogo de "Permitir acesso" voltaria a aparecer.
+    """
+    pkg = {'firewall': [{'name': 'WC', 'ports': [9096]}]}
+    scripts = _capture_firewall(monkeypatch, pkg, [Target(tmp_path, tmp_path)])
+    assert '-Profile Any' in scripts[0]
+
+
+def test_firewall_aceita_escopo_de_origem(monkeypatch, tmp_path):
+    pkg = {'firewall': [{'name': 'WC', 'ports': [9096], 'remote_address': 'LocalSubnet'}]}
+    scripts = _capture_firewall(monkeypatch, pkg, [Target(tmp_path, tmp_path)])
+    assert '-RemoteAddress LocalSubnet' in scripts[0]
+
+
+def test_firewall_recria_regra_para_convergir_mudanca_de_manifesto(monkeypatch, tmp_path):
+    """Sem o Remove antes, uma máquina que já tem a regra antiga ficaria com ela."""
+    pkg = {'firewall': [{'name': 'WC', 'ports': [9096]}]}
+    scripts = _capture_firewall(monkeypatch, pkg, [Target(tmp_path, tmp_path)])
+    script = scripts[0]
+    assert script.index('Remove-NetFirewallRule') < script.index('New-NetFirewallRule')
+
+
 def test_firewall_remove_bloqueios_pelo_caminho_do_programa(monkeypatch, tmp_path):
     pkg = {'firewall': [{
         'name': 'Sankhya WC',
