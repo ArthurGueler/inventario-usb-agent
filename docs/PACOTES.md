@@ -84,10 +84,25 @@ Antes da primeira alteração o agente salva um `.in9bak` ao lado do arquivo.
 
 ### Sobre `firewall`
 
-`purge_blocking_rules_matching` remove regras de **bloqueio** cujo nome casa com
-o padrão, antes de criar a permissão. No Firewall do Windows bloqueio vence
-permissão — quem instalou o app na mão e clicou "Cancelar" no prompt tem um block
-gravado que anularia a nossa regra.
+**Use `program`.** Uma regra só de porta não impede o diálogo *"Permitir que
+este aplicativo se comunique na rede"*: o Windows dispara esse prompt com base no
+**programa** que abre o socket, e confirmá-lo exige senha de administrador — o
+que trava o usuário comum logo no logon. A regra precisa apontar para o binário.
+
+Cuidado com qual binário: no Sankhya WC quem escuta não é o `web_connection.exe`,
+que é apenas um launcher, e sim o `javaw.exe` da JRE embutida. Descubra o certo
+com `netstat -ano | findstr <porta>` e o PID no Gerenciador de Tarefas.
+
+Como o binário mora dentro do perfil do usuário e o Firewall do Windows não
+aceita curinga em caminho, o agente cria **uma regra por perfil**, com o nome do
+perfil sufixado (`Sankhya Web Connection - fulano`).
+
+Duas formas de limpar bloqueios pré-existentes, que vencem qualquer permissão:
+
+- `purge_blocking_rules_matching` — casa pelo **nome** da regra.
+- `purge_blocking_program_matching` — casa pelo **caminho do programa**. Mais
+  preciso, e o recomendado: remove só o que aponta para a pasta do app, sem
+  arriscar apagar bloqueios legítimos de outros programas Java.
 
 `profiles` default é `Domain,Private`. Evite `Public`.
 
@@ -133,7 +148,8 @@ Valores extraídos de uma máquina já configurada
       "protocol": "TCP",
       "direction": "in",
       "profiles": ["Domain", "Private"],
-      "purge_blocking_rules_matching": "web_connection"
+      "program": "%USERPROFILE%\\Sankhya web\\Sankhya_web_connectionx64\\jre\\bin\\javaw.exe",
+      "purge_blocking_program_matching": "Sankhya web"
     }
   ],
   "autostart": {
@@ -154,6 +170,9 @@ Valores extraídos de uma máquina já configurada
   que não existe em disco). Clonar entre máquinas é seguro.
 - **A config só vale no próximo logon** do usuário. O agente não reinicia o WC
   se ele já estiver rodando.
+- **Quem escuta nas portas é o `jre\bin\javaw.exe`**, não o `web_connection.exe`.
+  A regra de firewall tem que apontar para ele, ou o usuário toma o prompt de
+  "Permitir acesso" no logon — que pede senha de admin e ele não tem.
 
 ## Empacotando
 

@@ -200,7 +200,7 @@ class PackageManager:
             if self.is_installed(pkg, target):
                 self._apply_config(pkg, target)
 
-        self._apply_firewall(pkg)
+        self._apply_firewall(pkg, targets)
         self._apply_autostart(pkg)
 
         if missing:
@@ -324,49 +324,96 @@ class PackageManager:
     # Firewall
     # -------------------------------------------------------------------------
 
-    def _apply_firewall(self, pkg: dict[str, Any]) -> None:
+    def _apply_firewall(self, pkg: dict[str, Any], targets: list[Target]) -> None:
         if sys.platform != 'win32':
             return
         for rule in pkg.get('firewall') or []:
             try:
-                self._ensure_firewall_rule(rule)
+                self._purge_blocking_rules(rule)
+
+                program = rule.get('program')
+                if not program:
+                    self._ensure_firewall_rule(rule)
+                    continue
+
+                # Uma regra so de porta NAO suprime o dialogo "Permitir acesso":
+                # o Windows pergunta com base no PROGRAMA que abre o socket, e
+                # confirmar exige admin — o que trava o usuario comum. Como o
+                # binario mora dentro do perfil, cada perfil precisa da sua regra
+                # (o Firewall do Windows nao aceita curinga em caminho).
+                for target in targets:
+                    path = expand_path(program, target.profile)
+                    if not path.exists():
+                        continue
+                    label = target.profile.name if target.profile else 'machine'
+                    self._ensure_firewall_rule(rule, program_path=path, suffix=label)
             except Exception as exc:
                 logger.warning('Falha ao aplicar regra de firewall %s: %s',
                                rule.get('name', '?'), exc)
 
-    def _ensure_firewall_rule(self, rule: dict[str, Any]) -> None:
-        name = rule.get('name')
-        ports = rule.get('ports') or ([rule['port']] if rule.get('port') else [])
-        if not name or not ports:
-            return
-
+    def _purge_blocking_rules(self, rule: dict[str, Any]) -> None:
+        """
+        Regras de bloqueio vencem regras de permissao no Firewall do Windows.
+        Quem clicou "Cancelar" no dialogo tem um block gravado que anularia a
+        nossa permissao — entao removemos antes de criar a regra boa.
+        """
         script: list[str] = []
 
-        # Regras de bloqueio vencem regras de permissao no Firewall do Windows.
-        # Quem instalou o app na mao e clicou "Cancelar" no prompt tem um block
-        # gravado que anularia a nossa permissao — entao removemos antes.
-        purge = rule.get('purge_blocking_rules_matching')
-        if purge:
+        by_name = rule.get('purge_blocking_rules_matching')
+        if by_name:
             script.append(
                 "Get-NetFirewallRule -ErrorAction SilentlyContinue | "
-                f"Where-Object {{ $_.Action -eq 'Block' -and $_.DisplayName -like '*{_ps_quote(purge)}*' }} | "
+                f"Where-Object {{ $_.Action -eq 'Block' -and $_.DisplayName -like '*{_ps_quote(by_name)}*' }} | "
                 "Remove-NetFirewallRule -ErrorAction SilentlyContinue;"
             )
 
+        by_program = rule.get('purge_blocking_program_matching')
+        if by_program:
+            # -Action Block primeiro de proposito: puxar o application filter de
+            # todas as regras do sistema leva minutos numa maquina real.
+            script.append(
+                "Get-NetFirewallRule -Action Block -ErrorAction SilentlyContinue | ForEach-Object { "
+                "$f = $_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue; "
+                f"if ($f -and $f.Program -like '*{_ps_quote(by_program)}*') "
+                "{ $_ | Remove-NetFirewallRule -ErrorAction SilentlyContinue } };"
+            )
+
+        if script:
+            self._powershell(' '.join(script))
+
+    def _ensure_firewall_rule(
+        self,
+        rule: dict[str, Any],
+        program_path: Path | None = None,
+        suffix: str | None = None,
+    ) -> None:
+        base_name = rule.get('name')
+        if not base_name:
+            return
+        ports = rule.get('ports') or ([rule['port']] if rule.get('port') else [])
+        if not ports and not program_path:
+            return
+
+        name = f'{base_name} - {suffix}' if suffix else base_name
         quoted = _ps_quote(name)
         direction = 'Inbound' if rule.get('direction', 'in') == 'in' else 'Outbound'
         protocol = rule.get('protocol', 'TCP')
-        localports = ','.join(str(p) for p in ports)
         profiles = ','.join(rule.get('profiles') or ['Domain', 'Private'])
-        script.append(
-            f"if (-not (Get-NetFirewallRule -DisplayName '{quoted}' -ErrorAction SilentlyContinue)) {{ "
-            f"New-NetFirewallRule -DisplayName '{quoted}' -Group 'IN9USBAgent' "
-            f"-Direction {direction} -Action Allow -Protocol {protocol} "
-            f"-LocalPort {localports} -Profile {profiles} | Out-Null }}"
-        )
 
-        self._powershell(' '.join(script))
-        logger.info('Regra de firewall garantida: %s (%s %s)', name, protocol, localports)
+        create = [
+            f"New-NetFirewallRule -DisplayName '{quoted}' -Group 'IN9USBAgent' "
+            f"-Direction {direction} -Action Allow -Protocol {protocol} -Profile {profiles}"
+        ]
+        if ports:
+            create.append(f"-LocalPort {','.join(str(p) for p in ports)}")
+        if program_path:
+            create.append(f"-Program '{_ps_quote(str(program_path))}'")
+
+        self._powershell(
+            f"if (-not (Get-NetFirewallRule -DisplayName '{quoted}' -ErrorAction SilentlyContinue)) "
+            f"{{ {' '.join(create)} | Out-Null }}"
+        )
+        logger.info('Regra de firewall garantida: %s', name)
 
     def _powershell(self, script: str) -> None:
         result = subprocess.run(

@@ -214,6 +214,97 @@ def test_apply_config_grava_backup_uma_unica_vez(tmp_path):
     assert 'antigo.exemplo.com.br' in backup.read_text(encoding='latin-1')
 
 
+# =============================================================================
+# Firewall
+#
+# O bug que motivou estes testes: uma regra só de porta NÃO suprime o diálogo
+# "Permitir acesso" do Windows. O diálogo é por PROGRAMA, e confirmá-lo exige
+# senha de admin — o que trava o usuário comum no logon.
+# =============================================================================
+
+def _capture_firewall(monkeypatch, pkg, targets):
+    monkeypatch.setattr('agent.packages.sys.platform', 'win32')
+    manager = PackageManager(FakeReporter())
+    scripts = []
+    monkeypatch.setattr(manager, '_powershell', lambda script: scripts.append(script))
+    manager._apply_firewall(pkg, targets)
+    return scripts
+
+
+def test_firewall_cria_regra_por_programa_em_cada_perfil(monkeypatch, tmp_path):
+    perfis = []
+    for nome in ('ana', 'bruno'):
+        exe = tmp_path / nome / 'app' / 'javaw.exe'
+        exe.parent.mkdir(parents=True)
+        exe.write_text('MZ')
+        perfis.append(Target(tmp_path / nome, tmp_path / nome))
+
+    pkg = {'firewall': [{
+        'name': 'Sankhya WC',
+        'ports': [9096, 9098],
+        'program': '%USERPROFILE%\\app\\javaw.exe',
+    }]}
+
+    scripts = _capture_firewall(monkeypatch, pkg, perfis)
+
+    assert len(scripts) == 2
+    juntos = ' '.join(scripts)
+    assert 'Sankhya WC - ana' in juntos
+    assert 'Sankhya WC - bruno' in juntos
+    assert juntos.count('-Program') == 2
+    assert '-LocalPort 9096,9098' in juntos
+
+
+def test_firewall_pula_perfil_sem_o_binario(monkeypatch, tmp_path):
+    presente = tmp_path / 'ana'
+    (presente / 'app').mkdir(parents=True)
+    (presente / 'app' / 'javaw.exe').write_text('MZ')
+    ausente = tmp_path / 'bruno'
+    ausente.mkdir()
+
+    pkg = {'firewall': [{
+        'name': 'Sankhya WC',
+        'ports': [9096],
+        'program': '%USERPROFILE%\\app\\javaw.exe',
+    }]}
+    targets = [Target(presente, presente), Target(ausente, ausente)]
+
+    scripts = _capture_firewall(monkeypatch, pkg, targets)
+
+    assert len(scripts) == 1
+    assert 'ana' in scripts[0]
+
+
+def test_firewall_sem_program_cria_regra_unica_de_porta(monkeypatch, tmp_path):
+    pkg = {'firewall': [{'name': 'Porta solta', 'ports': [9096]}]}
+    scripts = _capture_firewall(monkeypatch, pkg, [Target(tmp_path, tmp_path)])
+
+    assert len(scripts) == 1
+    assert '-Program' not in scripts[0]
+    assert '-LocalPort 9096' in scripts[0]
+
+
+def test_firewall_remove_bloqueios_pelo_caminho_do_programa(monkeypatch, tmp_path):
+    pkg = {'firewall': [{
+        'name': 'Sankhya WC',
+        'ports': [9096],
+        'purge_blocking_program_matching': 'Sankhya web',
+    }]}
+    scripts = _capture_firewall(monkeypatch, pkg, [Target(tmp_path, tmp_path)])
+
+    purga = scripts[0]
+    assert '-Action Block' in purga
+    assert 'Get-NetFirewallApplicationFilter' in purga
+    assert 'Sankhya web' in purga
+    assert 'Remove-NetFirewallRule' in purga
+
+
+def test_firewall_escapa_aspas_simples_no_nome(monkeypatch, tmp_path):
+    pkg = {'firewall': [{'name': "Regra d'Agua", 'ports': [9096]}]}
+    scripts = _capture_firewall(monkeypatch, pkg, [Target(tmp_path, tmp_path)])
+    assert "d''Agua" in scripts[0]
+
+
 def test_apply_config_ignora_arquivo_inexistente(tmp_path):
     pkg = {'config_files': [{
         'path': str(tmp_path / 'nao_existe.ini'),
