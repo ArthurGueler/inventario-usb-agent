@@ -248,6 +248,37 @@ def cmd_install_anydesk(args: argparse.Namespace) -> None:
             print(f'Aviso: falha ao re-registrar com AnyDesk ID ({exc}) — serviço retentará no heartbeat')
 
 
+def cmd_install_packages(args: argparse.Namespace) -> None:
+    """
+    Aplica agora o manifesto de /api/agent/packages, sem esperar o ciclo de 1h.
+    Útil para validar um pacote novo numa máquina piloto antes de liberar geral.
+    """
+    from .local_db import LocalDB
+    from .reporter import Reporter
+    from .packages import PackageManager
+
+    db = LocalDB()
+    if not db.server_url or not db.token:
+        print('Erro: agente não configurado. Execute "config" primeiro.')
+        sys.exit(1)
+
+    reporter = Reporter(server_url=db.server_url, token=db.token)
+    manager = PackageManager(reporter=reporter)
+
+    packages = manager._unwrap(reporter.list_packages())
+    if not packages:
+        print('Nenhum pacote publicado para esta máquina.')
+        return
+
+    for pkg in packages:
+        name = pkg.get('name', '?')
+        try:
+            manager.ensure_package(pkg)
+            print(f'{name}: OK')
+        except Exception as exc:
+            print(f'{name}: FALHOU — {exc}')
+
+
 def cmd_service(args: argparse.Namespace) -> None:
     """Delega ao win32serviceutil para instalar/start/stop/remove o serviço."""
     from .service import _HAS_WIN32, IN9USBAgentService
@@ -291,6 +322,7 @@ def main() -> None:
     p_reg.add_argument('--token', help='Token do agente')
 
     sub.add_parser('install-anydesk', help='Baixa e instala AnyDesk do servidor')
+    sub.add_parser('install-packages', help='Aplica agora o manifesto de pacotes do servidor')
 
     for action in ('install', 'start', 'stop', 'remove', 'restart'):
         p = sub.add_parser(action, help=f'Windows Service: {action}')
@@ -308,6 +340,8 @@ def main() -> None:
         cmd_register_new(args)
     elif args.command == 'install-anydesk':
         cmd_install_anydesk(args)
+    elif args.command == 'install-packages':
+        cmd_install_packages(args)
     else:
         cmd_service(args)
 

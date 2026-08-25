@@ -23,3 +23,7 @@ agent.db
 # OS
 .DS_Store
 Thumbs.db
+
+# Payloads do canal de pacotes (grandes, gerados por installer/build_package.py)
+dist-packages/
+*.zip

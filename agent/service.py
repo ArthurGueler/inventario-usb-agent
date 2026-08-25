@@ -30,12 +30,13 @@ from .hasher import compute_hash_id
 from .classifier import classify_physical
 from .specs import capture_machine_specs
 from .updater import Updater
+from .packages import PackageManager
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.20'
+AGENT_VERSION = '1.3.21'
 DEFAULT_SERVER_URL = 'https://inventario.in9automacao.com.br'
 
 
@@ -50,6 +51,7 @@ class AgentCore:
         self._reporter: Reporter | None = None
         self._monitor: UsbMonitor | None = None
         self._updater: Updater | None = None
+        self._packages: PackageManager | None = None
         self._stop_event = threading.Event()
 
     # -------------------------------------------------------------------------
@@ -86,6 +88,10 @@ class AgentCore:
         self._updater = Updater(reporter=reporter)
         self._updater.start()
 
+        # Instalação remota de software (Sankhya Web Connection etc.)
+        self._packages = PackageManager(reporter=reporter)
+        self._packages.start()
+
         # Loops de heartbeat e flush offline em threads separadas
         threading.Thread(target=self._heartbeat_loop, daemon=True, name='HeartbeatThread').start()
         threading.Thread(target=self._flush_loop, daemon=True, name='FlushThread').start()
@@ -99,6 +105,8 @@ class AgentCore:
             self._monitor.stop()
         if self._updater:
             self._updater.stop()
+        if self._packages:
+            self._packages.stop()
         logger.info('Agente parado.')
 
     def wait(self) -> None:

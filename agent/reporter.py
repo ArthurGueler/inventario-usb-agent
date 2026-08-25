@@ -129,6 +129,10 @@ class Reporter:
         """GET /api/agent/version — verifica se há update disponível."""
         return self._get('/api/agent/version')
 
+    def list_packages(self) -> dict[str, Any]:
+        """GET /api/agent/packages — manifesto de software que deve estar instalado."""
+        return self._get('/api/agent/packages')
+
     def report_health(self, code: str, level: str = 'info', message: str | None = None, context: dict[str, Any] | None = None) -> None:
         """POST /api/agent/health-report — reporta erro/evento interno. Falha silenciosa."""
         try:
