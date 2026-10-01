@@ -1,13 +1,13 @@
 # Comandos remotos
 
-O agente `1.3.27` pode buscar um comando pendente no servidor e executá-lo
+O agente `1.3.28` pode buscar um comando pendente no servidor e executá-lo
 como o usuário do serviço do Windows. A execução é não interativa: stdin fica
 desconectado e o agente aceita apenas `powershell` ou `cmd`.
 
 Fluxo do agente:
 
 1. A cada 15 segundos, faz `POST /api/agent/commands/claim` com
-   `{"agent_version":"1.3.27"}`.
+   `{"agent_version":"1.3.28"}`.
 2. Persiste `command_id`, `receipt_token` e o estado `started` no journal
    SQLite local antes de iniciar o processo.
 3. Executa um único comando por vez, com timeout entre 10 e 300 segundos.

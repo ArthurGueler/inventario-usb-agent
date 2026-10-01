@@ -37,7 +37,7 @@ jobs:
           pip install pyinstaller wmi pywin32 psutil requests pystray Pillow pytest
 
       - name: Executar testes
-        run: python -m pytest -q
+        run: python -m pytest -q --durations=10
 
       # --------------------------------------------------------
       # 4. PyInstaller → usb_agent.exe

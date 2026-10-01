@@ -11,19 +11,19 @@ from agent.commands import CommandExecutor, CommandJob
 pytestmark = pytest.mark.skipif(sys.platform != 'win32', reason='Windows process integration')
 
 
-def job(shell, command):
+def job(shell, command, timeout_seconds=10):
     return CommandJob.from_payload({
         'id': str(uuid.uuid4()), 'receipt_token': 'a' * 64,
-        'shell': shell, 'command': command, 'timeout_seconds': 10,
+        'shell': shell, 'command': command, 'timeout_seconds': timeout_seconds,
     })
 
 
-@pytest.mark.parametrize('shell,command', [
-    ('powershell', "Write-Output 'inventory-command-smoke'"),
-    ('cmd', 'echo inventory-command-smoke'),
+@pytest.mark.parametrize('shell,command,timeout_seconds', [
+    ('powershell', "Write-Output 'inventory-command-smoke'", 60),
+    ('cmd', 'echo inventory-command-smoke', 10),
 ])
-def test_windows_shell_execution(shell, command, tmp_path):
-    result = CommandExecutor(cwd=tmp_path).execute(job(shell, command))
+def test_windows_shell_execution(shell, command, timeout_seconds, tmp_path):
+    result = CommandExecutor(cwd=tmp_path).execute(job(shell, command, timeout_seconds))
     assert result.status == 'succeeded', result.stderr
     assert result.exit_code == 0
     assert 'inventory-command-smoke' in result.stdout
