@@ -14,6 +14,12 @@ pyinstaller ^
     --hidden-import win32service ^
     --hidden-import win32serviceutil ^
     --hidden-import win32event ^
+    --hidden-import win32job ^
+    --hidden-import win32process ^
+    --hidden-import win32api ^
+    --hidden-import win32security ^
+    --hidden-import ntsecuritycon ^
+    --hidden-import win32con ^
     --hidden-import servicemanager ^
     --hidden-import wmi ^
     --hidden-import pywintypes ^

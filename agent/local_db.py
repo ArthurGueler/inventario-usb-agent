@@ -14,28 +14,70 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .security_data import ensure_secure_data_dir
+
 logger = logging.getLogger(__name__)
 
 # Localização padrão:
 #   Windows: C:\Program Files\IN9Automacao\USBAgent\data\agent.db
-#   Linux/dev: diretório raiz do projeto
+#   Linux/dev: subdiretório de dados do projeto (nunca o checkout inteiro)
 def _default_db_path() -> Path:
     import sys
     if sys.platform == 'win32':
         base = Path(r'C:\Program Files\IN9Automacao\USBAgent\data')
     else:
-        base = Path(__file__).parent.parent
-    base.mkdir(parents=True, exist_ok=True)
+        base = Path(__file__).parent.parent / 'data'
     return base / 'agent.db'
 
 BATCH_SIZE = 50  # flush máximo de 50 eventos por vez
 
 
 class LocalDB:
-    def __init__(self, db_path: Path | None = None):
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        require_secure: bool = False,
+        security_backend: Any | None = None,
+    ):
         self._path = db_path or _default_db_path()
+        self._require_secure = require_secure
+        self._security_backend = security_backend
         self._lock = threading.Lock()
+        if require_secure:
+            ensure_secure_data_dir(
+                self._path.parent,
+                backend=security_backend,
+            )
+        else:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        if require_secure:
+            # SQLite may create -journal/WAL/SHM sidecars while opening the
+            # database. Protect and verify them before the caller can network.
+            ensure_secure_data_dir(
+                self._path.parent,
+                backend=security_backend,
+            )
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def secure_required(self) -> bool:
+        return self._require_secure
+
+    def validate_security(self) -> None:
+        if not self._require_secure:
+            return
+        # SQLite can create/recreate -journal, -wal and -shm files after the
+        # initial database setup.  Repair and verify the complete tree here so
+        # the service's pre-network check also covers those sidecars.
+        ensure_secure_data_dir(
+            self._path.parent,
+            backend=self._security_backend,
+        )
 
     # -------------------------------------------------------------------------
     # Inicialização
@@ -60,6 +102,14 @@ class LocalDB:
             """)
 
     def _connect(self) -> sqlite3.Connection:
+        if self._require_secure:
+            # Protect any sidecars left by the previous connection before a
+            # new SQLite handle is opened.  This is deliberately fail-closed:
+            # callers must not reach the network with an unverifiable store.
+            ensure_secure_data_dir(
+                self._path.parent,
+                backend=self._security_backend,
+            )
         conn = sqlite3.connect(str(self._path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
@@ -83,6 +133,11 @@ class LocalDB:
                     'INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)',
                     (key, value)
                 )
+
+    def delete_config(self, key: str) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute('DELETE FROM config WHERE key = ?', (key,))
 
     # Atalhos tipados
     @property

@@ -31,12 +31,23 @@ from .classifier import classify_physical
 from .specs import capture_machine_specs
 from .updater import Updater
 from .packages import PackageManager
+from .commands import CommandWorker
+from .security_data import (
+    SECURITY_DATA_CAPABILITY,
+    SECURITY_MARKER_KEY,
+    SECURITY_ROTATION_NEW_KEY,
+    SECURITY_ROTATION_OLD_KEY,
+    SECURITY_ROTATION_PENDING_KEY,
+    SecurityDataError,
+    can_consume_remote_commands,
+    canonical_server_url,
+)
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 300  # 5 minutos
 FLUSH_INTERVAL = 30       # tenta enviar buffer offline a cada 30s
-AGENT_VERSION = '1.3.24'
+AGENT_VERSION = '1.3.26'
 DEFAULT_SERVER_URL = 'https://inventario.in9automacao.com.br'
 
 
@@ -46,12 +57,18 @@ class AgentCore:
     quanto em modo standalone (para desenvolvimento/teste).
     """
 
-    def __init__(self, db: LocalDB):
+    def __init__(self, db: LocalDB, *, service_context: bool = False):
         self._db = db
+        self._service_context = service_context
+        self._security_ready = False
         self._reporter: Reporter | None = None
         self._monitor: UsbMonitor | None = None
         self._updater: Updater | None = None
         self._packages: PackageManager | None = None
+        self._commands: CommandWorker | None = None
+        self._remote_features_started = False
+        self._remote_features_lock = threading.Lock()
+        self._anydesk_thread_started = False
         self._stop_event = threading.Event()
 
     # -------------------------------------------------------------------------
@@ -61,6 +78,11 @@ class AgentCore:
     def start(self) -> None:
         logger.info('IN9USBAgent v%s iniciando...', AGENT_VERSION)
 
+        try:
+            self._db.validate_security()
+        except Exception as exc:
+            logger.error('Diretorio de dados nao passou na validacao de seguranca: %s', type(exc).__name__)
+            return
         self._ensure_base_config()
 
         reporter = self._build_reporter()
@@ -74,9 +96,9 @@ class AgentCore:
         # Registro/update no servidor
         self._do_register()
 
-        # Instalar AnyDesk se ausente — em thread para não bloquear startup do serviço
-        threading.Thread(target=self._try_install_anydesk, daemon=True, name='AnydeskInstallThread').start()
-
+        # Bootstrap registration uses the old token; remote updates and
+        # command consumption stay gated until security enrollment succeeds.
+        self._security_ready = self._ensure_security_enrollment(reporter)
         # Iniciar monitor USB
         self._monitor = UsbMonitor(
             on_event=self._handle_usb_event,
@@ -84,23 +106,88 @@ class AgentCore:
         )
         self._monitor.start()
 
-        # Updater automático
-        self._updater = Updater(reporter=reporter)
-        self._updater.start()
-
-        # Instalação remota de software (Sankhya Web Connection etc.)
-        self._packages = PackageManager(reporter=reporter)
-        self._packages.start()
-
         # Loops de heartbeat e flush offline em threads separadas
+        self._start_remote_features(reporter)
         threading.Thread(target=self._heartbeat_loop, daemon=True, name='HeartbeatThread').start()
         threading.Thread(target=self._flush_loop, daemon=True, name='FlushThread').start()
 
         logger.info('Agente em execução. Monitorando eventos USB...')
 
+    def _start_remote_features(self, reporter: Reporter | None = None) -> bool:
+        """Start privileged remote workers once, after security enrollment.
+
+        Enrollment may complete on a later heartbeat after a startup outage.
+        Each component is retained after a successful start, so retrying this
+        gate cannot create duplicate updater/package/command workers.
+        """
+
+        reporter = reporter or self._reporter
+        if reporter is None or not self._security_ready:
+            return False
+        if not can_consume_remote_commands(service_context=self._service_context):
+            return False
+
+        with self._remote_features_lock:
+            if not self._anydesk_thread_started:
+                try:
+                    threading.Thread(
+                        target=self._try_install_anydesk,
+                        daemon=True,
+                        name='AnydeskInstallThread',
+                    ).start()
+                    self._anydesk_thread_started = True
+                except Exception as exc:
+                    logger.warning('Canal AnyDesk remoto indisponivel: %s', type(exc).__name__)
+
+            if self._updater is None:
+                try:
+                    self._updater = Updater(reporter=reporter)
+                    self._updater.start()
+                except Exception as exc:
+                    self._updater = None
+                    logger.warning('Updater remoto indisponivel: %s', type(exc).__name__)
+
+            if self._packages is None:
+                try:
+                    self._packages = PackageManager(reporter=reporter)
+                    self._packages.start()
+                except Exception as exc:
+                    self._packages = None
+                    logger.warning('Instalacao remota de pacotes indisponivel: %s', type(exc).__name__)
+
+            if self._commands is None:
+                try:
+                    self._commands = CommandWorker(
+                        db=self._db,
+                        reporter=reporter,
+                        agent_version=AGENT_VERSION,
+                        enabled=True,
+                        service_context=self._service_context,
+                    )
+                    self._commands.start()
+                except Exception as exc:
+                    self._commands = None
+                    logger.warning('Canal de comandos remoto indisponivel: %s', type(exc).__name__)
+                    try:
+                        reporter.report_health(
+                            code='command_worker_start_failed',
+                            level='error',
+                            message=type(exc).__name__,
+                        )
+                    except Exception:
+                        pass
+
+            self._remote_features_started = all(
+                component is not None
+                for component in (self._updater, self._packages, self._commands)
+            )
+            return self._remote_features_started
+
     def stop(self) -> None:
         logger.info('Parando IN9USBAgent...')
         self._stop_event.set()
+        if self._commands:
+            self._commands.stop()
         if self._monitor:
             self._monitor.stop()
         if self._updater:
@@ -130,7 +217,51 @@ class AgentCore:
         token = self._db.token
         if not server_url or not token:
             return None
-        return Reporter(server_url=server_url, token=token)
+        try:
+            canonical_server_url(server_url)
+        except SecurityDataError as exc:
+            logger.error('URL do servidor rejeitada: %s', type(exc).__name__)
+            return None
+        return Reporter(server_url=server_url, token=token, enforce_origin=True)
+
+    def _ensure_security_enrollment(self, reporter: Reporter) -> bool:
+        """Rotate the bootstrap token and gate remote features until ack."""
+        if self._db.get_config(SECURITY_MARKER_KEY) == SECURITY_DATA_CAPABILITY:
+            self._db.delete_config(SECURITY_ROTATION_OLD_KEY)
+            self._db.delete_config(SECURITY_ROTATION_NEW_KEY)
+            self._db.delete_config(SECURITY_ROTATION_PENDING_KEY)
+            return True
+        old_token = self._db.get_config(SECURITY_ROTATION_OLD_KEY) or self._db.token
+        new_token = self._db.get_config(SECURITY_ROTATION_NEW_KEY)
+        if not old_token:
+            return False
+        if not new_token or self._db.get_config(SECURITY_ROTATION_PENDING_KEY) != '1':
+            new_token = secrets.token_hex(32)
+            # Durable before the first security-enroll request.
+            self._db.set_config(SECURITY_ROTATION_OLD_KEY, old_token)
+            self._db.set_config(SECURITY_ROTATION_NEW_KEY, new_token)
+            self._db.set_config(SECURITY_ROTATION_PENDING_KEY, '1')
+        try:
+            response = reporter.security_enroll(
+                agent_version=AGENT_VERSION,
+                new_token=new_token,
+            )
+            data = response.get('data') if isinstance(response, dict) else None
+            if (not isinstance(response, dict) or response.get('success') is not True
+                    or not isinstance(data, dict)
+                    or data.get('security_enrolled') is not True):
+                return False
+        except Exception as exc:
+            logger.warning('Enrollment de seguranca pendente: %s', type(exc).__name__)
+            return False
+
+        self._db.token = new_token
+        self._db.set_config(SECURITY_MARKER_KEY, SECURITY_DATA_CAPABILITY)
+        self._db.delete_config(SECURITY_ROTATION_OLD_KEY)
+        self._db.delete_config(SECURITY_ROTATION_NEW_KEY)
+        self._db.delete_config(SECURITY_ROTATION_PENDING_KEY)
+        reporter.set_token(new_token)
+        return True
 
     # -------------------------------------------------------------------------
     # AnyDesk
@@ -271,6 +402,11 @@ class AgentCore:
         while not self._stop_event.wait(HEARTBEAT_INTERVAL):
             if self._reporter:
                 try:
+                    if not self._security_ready:
+                        self._security_ready = self._ensure_security_enrollment(self._reporter)
+                    if not self._security_ready:
+                        continue
+                    self._start_remote_features(self._reporter)
                     if not self._db.machine_id:
                         self._recover_registration()
                     resp = self._reporter.heartbeat(agent_version=AGENT_VERSION)
@@ -293,7 +429,9 @@ class AgentCore:
             # Retry AnyDesk se ainda não instalado
             try:
                 from .anydesk import is_installed
-                if not is_installed() and self._reporter:
+                if (self._security_ready
+                        and can_consume_remote_commands(service_context=self._service_context)
+                        and not is_installed() and self._reporter):
                     self._try_install_anydesk()
             except Exception:
                 pass
@@ -435,8 +573,8 @@ try:
         def __init__(self, args: Any):
             win32serviceutil.ServiceFramework.__init__(self, args)
             self._stop_handle = win32event.CreateEvent(None, 0, 0, None)
-            self._db = LocalDB()
-            self._core = AgentCore(self._db)
+            self._db = LocalDB(require_secure=True)
+            self._core = AgentCore(self._db, service_context=True)
 
         def SvcStop(self) -> None:
             self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)

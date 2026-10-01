@@ -67,11 +67,9 @@ def _service_is_running() -> bool:
 
 def _pending_events() -> int:
     """Lê a contagem de eventos pendentes no buffer local."""
-    try:
-        from .local_db import LocalDB
-        return LocalDB().pending_count()
-    except Exception:
-        return 0
+    # The interactive tray must never open the token/event database.  Status
+    # is derived solely from the Windows Service Control Manager.
+    return 0
 
 
 class TrayIcon:
@@ -126,7 +124,5 @@ class TrayIcon:
         while not self._stop_event.wait(POLL_INTERVAL):
             if not _service_is_running():
                 self.set_status(TrayStatus.ERROR)
-            elif _pending_events() > 0:
-                self.set_status(TrayStatus.OFFLINE)
             else:
                 self.set_status(TrayStatus.ONLINE)

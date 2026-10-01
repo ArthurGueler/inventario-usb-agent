@@ -56,6 +56,10 @@ jobs:
             --hidden-import win32ts `
             --hidden-import win32profile `
             --hidden-import win32process `
+            --hidden-import win32job `
+            --hidden-import win32api `
+            --hidden-import win32security `
+            --hidden-import ntsecuritycon `
             --hidden-import win32con `
             --hidden-import wmi `
             --hidden-import pywintypes `

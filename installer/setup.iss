@@ -6,7 +6,7 @@
 ; Ou via build\build_installer.bat
 
 #define AppName      "IN9 USB Agent"
-#define AppVersion   "1.3.24"
+#define AppVersion   "1.3.26"
 #define AppPublisher "IN9 Automacao"
 #define AppExeName   "usb_agent.exe"
 #define ServiceName  "IN9USBAgent"
@@ -45,7 +45,9 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 Source: "..\dist\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
-Name: "{#DataDir}"; Permissions: everyone-full
+; The service applies and verifies the protected SYSTEM/Administrators ACL
+; before opening the database. Do not grant interactive users access here.
+Name: "{#DataDir}"
 
 [Code]
 var

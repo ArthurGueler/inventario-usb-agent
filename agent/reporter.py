@@ -8,19 +8,38 @@ Nunca loga o token em texto claro — apenas os últimos 8 chars.
 import logging
 import socket
 from typing import Any
+from urllib.parse import quote, urlparse
 
 import requests
+
+from .security_data import canonical_server_url
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 10  # segundos por request
 
 
+class InsecureCommandTransportError(ValueError):
+    """Remote commands are allowed only over HTTPS outside tests."""
+
+
 class Reporter:
-    def __init__(self, server_url: str, token: str):
+    def __init__(
+        self,
+        server_url: str,
+        token: str,
+        *,
+        session: requests.Session | None = None,
+        allow_insecure: bool = False,
+        enforce_origin: bool = False,
+    ):
         self._base = server_url.rstrip('/')
         self._token = token
-        self._session = requests.Session()
+        self._allow_insecure = allow_insecure
+        self._enforce_origin = enforce_origin
+        if enforce_origin:
+            canonical_server_url(self._base)
+        self._session = session or requests.Session()
         self._session.headers.update({
             'X-Agent-Token': token,
             'Content-Type': 'application/json',
@@ -42,15 +61,41 @@ class Reporter:
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f'{self._base}{path}'
-        response = self._session.post(url, json=payload, timeout=TIMEOUT)
+        response = self._session.post(
+            url, json=payload, timeout=TIMEOUT, allow_redirects=False
+        )
+        self._reject_redirect(response)
         response.raise_for_status()
         return response.json()
 
     def _get(self, path: str) -> dict[str, Any]:
         url = f'{self._base}{path}'
-        response = self._session.get(url, timeout=TIMEOUT)
+        response = self._session.get(url, timeout=TIMEOUT, allow_redirects=False)
+        self._reject_redirect(response)
         response.raise_for_status()
         return response.json()
+
+    @staticmethod
+    def _reject_redirect(response: Any) -> None:
+        status = getattr(response, 'status_code', None)
+        if isinstance(status, int) and 300 <= status < 400:
+            raise requests.TooManyRedirects('redirects are disabled for agent requests')
+
+    def for_commands(self) -> 'Reporter':
+        """Build a command client with a private requests.Session."""
+        return Reporter(
+            server_url=self._base,
+            token=self._token,
+            allow_insecure=self._allow_insecure,
+            enforce_origin=True,
+        )
+
+    def _assert_command_transport(self) -> None:
+        scheme = urlparse(self._base).scheme.lower()
+        if scheme != 'https' and not self._allow_insecure:
+            raise InsecureCommandTransportError(
+                'remote commands require an HTTPS server URL'
+            )
 
     # -------------------------------------------------------------------------
     # Rotas do agente
@@ -91,9 +136,12 @@ class Reporter:
         # Esta rota é pública — não usa o header X-Agent-Token
         # O token é enviado no body para o servidor armazená-lo
         payload['token'] = self._token
-        resp = requests.post(url, json=payload, timeout=TIMEOUT,
+        if self._enforce_origin:
+            canonical_server_url(self._base)
+        resp = requests.post(url, json=payload, timeout=TIMEOUT, allow_redirects=False,
                              headers={'Content-Type': 'application/json',
                                       'User-Agent': 'IN9USBAgent/1.0'})
+        self._reject_redirect(resp)
         resp.raise_for_status()
         return resp.json()
 
@@ -145,11 +193,62 @@ class Reporter:
         except Exception:
             pass  # Telemetria não pode quebrar o fluxo principal
 
+    # -------------------------------------------------------------------------
+    # Remote command channel
+    # -------------------------------------------------------------------------
+
+    def claim_command(self, agent_version: str) -> dict[str, Any]:
+        """Claim at most one pending command for this agent."""
+        self._assert_command_transport()
+        return self._post('/api/agent/commands/claim', {
+            'agent_version': agent_version,
+        })
+
+    def send_command_result(self, command_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        """Post a command result using the receipt token issued with the job."""
+        self._assert_command_transport()
+        if not isinstance(command_id, str) or not command_id:
+            raise ValueError('command_id is required')
+        path_id = quote(command_id, safe='')
+        payload = {
+            'receipt_token': result.get('receipt_token'),
+            'status': result.get('status'),
+            'stdout': result.get('stdout', ''),
+            'stderr': result.get('stderr', ''),
+            'exit_code': result.get('exit_code'),
+            'output_truncated': bool(result.get('output_truncated', False)),
+        }
+        return self._post(f'/api/agent/commands/{path_id}/result', payload)
+
+    def security_enroll(self, agent_version: str, new_token: str) -> dict[str, Any]:
+        """Enroll secure-data capability, retrying once with the new token."""
+        payload = {
+            'agent_version': agent_version,
+            'capabilities': ['secure_data_acl_v1'],
+            'new_token': new_token,
+        }
+        try:
+            return self._post('/api/agent/security-enroll', payload)
+        except requests.HTTPError as exc:
+            response = exc.response
+            if response is None or response.status_code != 401:
+                raise
+            previous = self._session.headers.get('X-Agent-Token')
+            self._session.headers['X-Agent-Token'] = new_token
+            try:
+                return self._post('/api/agent/security-enroll', payload)
+            finally:
+                if previous is None:
+                    self._session.headers.pop('X-Agent-Token', None)
+                else:
+                    self._session.headers['X-Agent-Token'] = previous
+
     def download_anydesk(self, dest: 'Path') -> None:
         """GET /api/agent/download-anydesk — baixa o instalador do AnyDesk para dest."""
         from pathlib import Path as _Path
         url = f'{self._base}/api/agent/download-anydesk'
-        with self._session.get(url, stream=True, timeout=120) as resp:
+        with self._session.get(url, stream=True, timeout=120, allow_redirects=False) as resp:
+            self._reject_redirect(resp)
             resp.raise_for_status()
             with open(dest, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=65536):

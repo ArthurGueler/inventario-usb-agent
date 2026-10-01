@@ -72,7 +72,14 @@ logger = logging.getLogger('agent')
 
 def _get_db():
     from .local_db import LocalDB
-    return LocalDB()
+    return LocalDB(require_secure=True)
+
+
+def _require_elevation() -> None:
+    from .security_data import is_elevated
+    if not is_elevated():
+        print('Erro: este comando precisa ser executado como Administrador.')
+        raise SystemExit(1)
 
 
 # =============================================================================
@@ -101,11 +108,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     Roda o agente em modo standalone (foreground) sem instalar como serviço.
     Útil para testes. Não exibe ícone na bandeja — use 'tray' para isso.
     """
-    from .local_db import LocalDB
     from .service import AgentCore
 
-    db = LocalDB()
-    core = AgentCore(db)
+    _require_elevation()
+    db = _get_db()
+    core = AgentCore(db, service_context=False)
     core.start()
     try:
         core.wait()
@@ -133,8 +140,15 @@ def cmd_tray(args: argparse.Namespace) -> None:
 def cmd_config(args: argparse.Namespace) -> None:
     """Salva server_url, token e nome do colaborador no SQLite local."""
     import secrets
+    from .security_data import canonical_server_url
+    _require_elevation()
     db = _get_db()
     if args.url:
+        try:
+            canonical_server_url(args.url)
+        except Exception:
+            print('Erro: URL deve ser exatamente https://inventario.in9automacao.com.br')
+            raise SystemExit(1)
         db.server_url = args.url
         print(f'server_url salvo: {args.url}')
     if args.token:
@@ -153,11 +167,12 @@ def cmd_register_new(args: argparse.Namespace) -> None:
     """Cria novo registro no servidor (primeira instalação)."""
     import socket
     from .reporter import Reporter
-    from .local_db import LocalDB
+    from .security_data import canonical_server_url
     from .specs import capture_machine_specs
     from .service import AGENT_VERSION
 
-    db = LocalDB()
+    _require_elevation()
+    db = _get_db()
     url = args.url or db.server_url
     token = args.token or db.token
 
@@ -165,10 +180,15 @@ def cmd_register_new(args: argparse.Namespace) -> None:
         print('Erro: informe --url e --token (ou configure via "config")')
         sys.exit(1)
 
+    try:
+        canonical_server_url(url)
+    except Exception:
+        print('Erro: URL deve ser exatamente https://inventario.in9automacao.com.br')
+        raise SystemExit(1)
     db.server_url = url
     db.token = token
 
-    reporter = Reporter(server_url=url, token=token)
+    reporter = Reporter(server_url=url, token=token, enforce_origin=True)
     specs = capture_machine_specs()
     hostname = specs.get('hostname') or socket.gethostname()
 
@@ -204,19 +224,19 @@ def cmd_install_anydesk(args: argparse.Namespace) -> None:
       Caso 2: AnyDesk não instalado → instala, captura ID e re-registra
     """
     import socket
-    from .local_db import LocalDB
     from .reporter import Reporter
     from .anydesk import ensure_anydesk, is_installed
     from .specs import get_anydesk_id, capture_machine_specs
 
-    db = LocalDB()
+    _require_elevation()
+    db = _get_db()
     url = db.server_url
     token = db.token
     if not url or not token:
         print('Erro: agente não configurado. Execute "config" primeiro.')
         sys.exit(1)
 
-    reporter = Reporter(server_url=url, token=token)
+    reporter = Reporter(server_url=url, token=token, enforce_origin=True)
 
     if is_installed():
         anydesk_id = get_anydesk_id()
@@ -253,16 +273,20 @@ def cmd_install_packages(args: argparse.Namespace) -> None:
     Aplica agora o manifesto de /api/agent/packages, sem esperar o ciclo de 1h.
     Útil para validar um pacote novo numa máquina piloto antes de liberar geral.
     """
-    from .local_db import LocalDB
     from .reporter import Reporter
     from .packages import PackageManager
+    from .security_data import SECURITY_DATA_CAPABILITY, SECURITY_MARKER_KEY
 
-    db = LocalDB()
+    _require_elevation()
+    db = _get_db()
     if not db.server_url or not db.token:
         print('Erro: agente não configurado. Execute "config" primeiro.')
         sys.exit(1)
 
-    reporter = Reporter(server_url=db.server_url, token=db.token)
+    if db.get_config(SECURITY_MARKER_KEY) != SECURITY_DATA_CAPABILITY:
+        print('Erro: enrollment de seguranca do servico ainda nao foi confirmado.')
+        raise SystemExit(1)
+    reporter = Reporter(server_url=db.server_url, token=db.token, enforce_origin=True)
     manager = PackageManager(reporter=reporter)
 
     packages = manager._unwrap(reporter.list_packages())
