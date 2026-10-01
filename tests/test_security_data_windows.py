@@ -3,7 +3,10 @@ import os
 
 import pytest
 
-from agent.security_data import ensure_secure_data_dir, is_elevated, validate_secure_data_dir
+from agent.security_data import (
+    PROTECTED_DACL_SECURITY_INFORMATION,
+    ensure_secure_data_dir, is_elevated, validate_secure_data_dir,
+)
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows ACL integration')
@@ -27,7 +30,7 @@ def test_windows_repairs_legacy_acl_before_using_sqlite(tmp_path):
     )
     security.SetNamedSecurityInfo(
         str(root), security.SE_FILE_OBJECT,
-        security.DACL_SECURITY_INFORMATION | 0x80000000,
+        security.DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
         None, None, legacy, None,
     )
     (root / 'existing.txt').write_text('not-a-credential', encoding='utf-8')

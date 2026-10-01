@@ -29,6 +29,7 @@ SECURITY_ROTATION_PENDING_KEY = "security_rotation_pending"
 
 FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 SE_DACL_PROTECTED = 0x1000
+PROTECTED_DACL_SECURITY_INFORMATION = -(1 << 31)
 ERROR_INVALID_REPARSE_DATA = 4392
 ERROR_NOT_ALL_ASSIGNED = 1300
 
@@ -274,7 +275,9 @@ class WindowsAclBackend:
         self._se_file_object = getattr(win32security, "SE_FILE_OBJECT", 1)
         self._owner_info = getattr(win32security, "OWNER_SECURITY_INFORMATION", 0x1)
         self._dacl_info = getattr(win32security, "DACL_SECURITY_INFORMATION", 0x4)
-        self._protected_info = 0x80000000  # PROTECTED_DACL_SECURITY_INFORMATION
+        # pywin32 parses SecurityInfo as a signed Windows C long. Preserve the
+        # DWORD bit pattern without passing an overflowing positive integer.
+        self._protected_info = PROTECTED_DACL_SECURITY_INFORMATION
         self._access_allowed = getattr(win32security, "ACCESS_ALLOWED_ACE_TYPE", 0)
         self._acl_revision = getattr(win32security, "ACL_REVISION", 2)
         self._object_inherit = getattr(win32security, "OBJECT_INHERIT_ACE", 0x1)
